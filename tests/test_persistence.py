@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 
 from central.app.persistence import (
+    count_problem_results_for_site_in_period,
     cleanup_check_results_older_than,
     get_probe,
     connect_database,
@@ -11,6 +12,7 @@ from central.app.persistence import (
     list_active_sites,
     list_check_results_for_site_on_date,
     list_check_results_for_site_in_period,
+    list_check_details_for_site_in_period,
     list_check_results_for_site,
     list_recent_problem_results,
     list_problem_results_for_site_in_period,
@@ -237,6 +239,96 @@ def test_period_queries_use_half_open_utc_boundaries(tmp_path) -> None:
 
     assert results == [first, last_problem]
     assert problems == [last_problem]
+
+
+def test_detail_query_is_newest_first_and_limited_without_limiting_period_data(
+    tmp_path,
+) -> None:
+    connection = connect_database(tmp_path / "central.sqlite3")
+    initialize_database(connection)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    probe = create_probe(
+        connection,
+        probe_id="ru-dc-1",
+        name="Russia Datacenter",
+        region="Russia",
+        token_hash="test-token-hash",
+    )
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    created = [
+        create_check_result(
+            connection,
+            site_id=site.id,
+            probe_id=probe.id,
+            checked_at=start_at + timedelta(minutes=index),
+            result_status="ok",
+            status_group="2xx",
+            http_status=200,
+        )
+        for index in range(3)
+    ]
+
+    all_results = list_check_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=3),
+    )
+    details = list_check_details_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=3),
+        limit=2,
+    )
+
+    assert all_results == created
+    assert details == [created[2], created[1]]
+
+
+def test_problem_count_is_independent_of_display_limit_and_results_are_newest_first(
+    tmp_path,
+) -> None:
+    connection = connect_database(tmp_path / "central.sqlite3")
+    initialize_database(connection)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    probe = create_probe(
+        connection,
+        probe_id="ru-dc-1",
+        name="Russia Datacenter",
+        region="Russia",
+        token_hash="test-token-hash",
+    )
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    created = [
+        create_check_result(
+            connection,
+            site_id=site.id,
+            probe_id=probe.id,
+            checked_at=start_at + timedelta(minutes=index),
+            result_status="server_error",
+            status_group="5xx",
+            http_status=500,
+        )
+        for index in range(12)
+    ]
+
+    displayed = list_problem_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=12),
+    )
+    total = count_problem_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=12),
+    )
+
+    assert len(displayed) == 10
+    assert displayed == list(reversed(created[2:]))
+    assert total == 12
 
 
 def test_cleanup_check_results_older_than_deletes_only_expired_raw_results(tmp_path) -> None:

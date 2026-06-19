@@ -9,6 +9,9 @@ from fastapi.testclient import TestClient
 from central.app.auth import ADMIN_SESSION_COOKIE, hash_admin_password
 from central.app.dashboard import (
     DashboardPeriod,
+    DEFAULT_DETAIL_LIMIT,
+    DETAIL_LIMITS,
+    _parse_detail_limit,
     _parse_dashboard_period,
     _probe_colors,
     _render_probe_period_summary,
@@ -311,8 +314,45 @@ def test_dashboard_period_filters_graph_details_and_problems(dashboard_client) -
     assert response.status_code == 200
     assert "No response time data for the selected period." in response.text
     assert "No check results for the selected period." in response.text
-    assert "No recent problems for the selected site." in response.text
+    assert "Total problems: 0" in response.text
+    assert "За выбранный период проблем не зафиксировано" in response.text
     assert f"date={selected_date}&amp;from_time=00%3A00&amp;to_time=00%3A00" in response.text
+
+
+def test_dashboard_detail_limit_uses_allowlist_and_is_preserved_in_navigation(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+
+    selected = dashboard_client.get("/dashboard?limit=20")
+    invalid = dashboard_client.get("/dashboard?limit=21")
+    malformed = dashboard_client.get("/dashboard?limit=many")
+
+    assert selected.status_code == 200
+    assert '<option value="20" selected>20</option>' in selected.text
+    assert "limit=20" in selected.text
+    assert f'<option value="{DEFAULT_DETAIL_LIMIT}" selected>' in invalid.text
+    assert f'<option value="{DEFAULT_DETAIL_LIMIT}" selected>' in malformed.text
+    assert tuple(_parse_detail_limit(str(value)) for value in DETAIL_LIMITS) == DETAIL_LIMITS
+    assert _parse_detail_limit(None) == DEFAULT_DETAIL_LIMIT
+
+
+def test_dashboard_problems_heading_and_total_count(dashboard_client) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+
+    response = dashboard_client.get("/dashboard")
+
+    assert "Problems for selected period" in response.text
+    assert "Recent Problems" not in response.text
+    assert "Total problems: 1" in response.text
 
 
 def test_probe_period_summary_calculates_metrics_and_caps_coverage() -> None:

@@ -24,8 +24,10 @@ from central.app.auth import (
 )
 from central.app.models import CheckResult, Probe, Site
 from central.app.persistence import (
+    count_problem_results_for_site_in_period,
     get_site,
     list_active_sites,
+    list_check_details_for_site_in_period,
     list_check_results_for_site_in_period,
     list_enabled_probes,
     list_latest_results_for_site_by_probe,
@@ -43,6 +45,8 @@ DEFAULT_FROM_TIME = time(0, 0)
 DEFAULT_TO_TIME = time(23, 59)
 PROBE_INTERVAL_SECONDS = 60
 STALE_AFTER = timedelta(minutes=3)
+DETAIL_LIMITS = (20, 50, 100, 250)
+DEFAULT_DETAIL_LIMIT = 50
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,7 @@ def dashboard(
     date_value: Annotated[str | None, Query(alias="date")] = None,
     from_time: Annotated[str | None, Query()] = None,
     to_time: Annotated[str | None, Query()] = None,
+    limit: Annotated[str | None, Query()] = None,
 ) -> Response:
     username = _current_admin_username(request)
     if username is None:
@@ -147,6 +152,7 @@ def dashboard(
         min_date=min_date,
         max_date=today,
     )
+    detail_limit = _parse_detail_limit(limit)
     latest_results = (
         list_latest_results_for_site_by_probe(connection, site_id=selected_site.id)
         if selected_site is not None
@@ -162,6 +168,17 @@ def dashboard(
         if selected_site is not None
         else []
     )
+    detail_results = (
+        list_check_details_for_site_in_period(
+            connection,
+            site_id=selected_site.id,
+            start_at=period.start_at,
+            end_at=period.end_at,
+            limit=detail_limit,
+        )
+        if selected_site is not None
+        else []
+    )
     recent_problems = (
         list_problem_results_for_site_in_period(
             connection,
@@ -172,6 +189,16 @@ def dashboard(
         if selected_site is not None
         else []
     )
+    problem_count = (
+        count_problem_results_for_site_in_period(
+            connection,
+            site_id=selected_site.id,
+            start_at=period.start_at,
+            end_at=period.end_at,
+        )
+        if selected_site is not None
+        else 0
+    )
 
     return HTMLResponse(
         _render_dashboard_page(
@@ -181,7 +208,10 @@ def dashboard(
             probes=probes,
             latest_results=latest_results,
             period_results=period_results,
+            detail_results=detail_results,
             recent_problems=recent_problems,
+            problem_count=problem_count,
+            detail_limit=detail_limit,
             period=period,
             min_date=min_date,
             max_date=today,
@@ -331,12 +361,15 @@ def _render_dashboard_page(
     probes: list[Probe],
     latest_results: dict[str, CheckResult],
     period_results: list[CheckResult],
+    detail_results: list[CheckResult],
     recent_problems: list[CheckResult],
+    problem_count: int,
+    detail_limit: int,
     period: DashboardPeriod,
     min_date: date,
     max_date: date,
 ) -> str:
-    sites_html = _render_sites(sites, selected_site, period)
+    sites_html = _render_sites(sites, selected_site, period, detail_limit)
     statuses_html = _render_probe_period_summary(
         probes,
         latest_results,
@@ -344,10 +377,14 @@ def _render_dashboard_page(
         period=period,
         now=datetime.now(UTC),
     )
-    date_form_html = _render_date_form(selected_site, period, min_date, max_date)
+    date_form_html = _render_date_form(
+        selected_site, period, min_date, max_date, detail_limit
+    )
     chart_html = _render_response_time_chart(period_results, probes)
-    details_html = _render_daily_details(period_results, probes)
-    problems_html = _render_recent_problems(recent_problems, probes)
+    details_html = _render_daily_details(detail_results, probes)
+    problems_html = _render_recent_problems(
+        recent_problems, probes, total_count=problem_count
+    )
     selected_name = selected_site.name if selected_site is not None else "No active site"
     selected_url = selected_site.url if selected_site is not None else ""
 
@@ -432,7 +469,7 @@ def _render_dashboard_page(
       {chart_html}
       <h2>Check Details</h2>
       {details_html}
-      <h2>Recent Problems</h2>
+      <h2>Problems for selected period</h2>
       {problems_html}
     </section>
   </main>
@@ -492,7 +529,10 @@ def _render_dashboard_page(
 
 
 def _render_sites(
-    sites: list[Site], selected_site: Site | None, period: DashboardPeriod
+    sites: list[Site],
+    selected_site: Site | None,
+    period: DashboardPeriod,
+    detail_limit: int,
 ) -> str:
     if not sites:
         return '<p class="muted">No active sites configured.</p>'
@@ -507,6 +547,7 @@ def _render_sites(
                 "date": period.selected_date.isoformat(),
                 "from_time": period.from_time.strftime("%H:%M"),
                 "to_time": period.to_time.strftime("%H:%M"),
+                "limit": detail_limit,
             }
         )
         items.append(
@@ -655,6 +696,7 @@ def _render_date_form(
     period: DashboardPeriod,
     min_date: date,
     max_date: date,
+    detail_limit: int,
 ) -> str:
     site_input = (
         f'<input type="hidden" name="site_id" value="{selected_site.id}">'
@@ -663,6 +705,10 @@ def _render_date_form(
     )
     message_html = (
         f'<p class="error">{escape(period.message)}</p>' if period.message else ""
+    )
+    limit_options = "".join(
+        f'<option value="{value}"{" selected" if value == detail_limit else ""}>{value}</option>'
+        for value in DETAIL_LIMITS
     )
     return f"""
       {message_html}
@@ -679,6 +725,9 @@ def _render_date_form(
         <label for="to_time">To (MSK)
           <input id="to_time" name="to_time" type="time"
             value="{period.to_time.strftime('%H:%M')}" required>
+        </label>
+        <label for="limit">Check Details rows
+          <select id="limit" name="limit">{limit_options}</select>
         </label>
         <button type="submit">Show</button>
       </form>
@@ -898,9 +947,15 @@ def _render_daily_details(
 def _render_recent_problems(
     recent_problems: list[CheckResult],
     probes: list[Probe],
+    *,
+    total_count: int,
 ) -> str:
+    count_html = f'<p class="muted">Total problems: {total_count}</p>'
     if not recent_problems:
-        return '<p class="muted">No recent problems for the selected site.</p>'
+        return (
+            f'{count_html}<p class="muted">'
+            "За выбранный период проблем не зафиксировано</p>"
+        )
 
     probe_names = {probe.id: probe.name for probe in probes}
     rows = []
@@ -921,11 +976,19 @@ def _render_recent_problems(
             "</tr>"
         )
 
-    return (
+    return count_html + (
         "<table><thead><tr><th>Timestamp (MSK)</th><th>Probe</th><th>Status</th>"
         "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
+
+
+def _parse_detail_limit(value: str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else DEFAULT_DETAIL_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_DETAIL_LIMIT
+    return parsed if parsed in DETAIL_LIMITS else DEFAULT_DETAIL_LIMIT
 
 
 def _status_badge(status_group: str) -> str:

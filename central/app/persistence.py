@@ -277,6 +277,35 @@ def list_check_results_for_site_in_period(
     return [_row_to_check_result(row) for row in rows]
 
 
+def list_check_details_for_site_in_period(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    start_at: datetime,
+    end_at: datetime,
+    limit: int,
+) -> list[CheckResult]:
+    """Return newest results for the details table in a half-open UTC interval."""
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM check_results
+        WHERE site_id = ?
+            AND checked_at >= ?
+            AND checked_at < ?
+        ORDER BY checked_at DESC, probe_id, id DESC
+        LIMIT ?
+        """,
+        (
+            site_id,
+            _to_db_datetime(start_at),
+            _to_db_datetime(end_at),
+            limit,
+        ),
+    ).fetchall()
+    return [_row_to_check_result(row) for row in rows]
+
+
 def list_latest_results_for_site_by_probe(
     connection: sqlite3.Connection,
     *,
@@ -366,6 +395,32 @@ def list_problem_results_for_site_in_period(
         ),
     ).fetchall()
     return [_row_to_check_result(row) for row in rows]
+
+
+def count_problem_results_for_site_in_period(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    start_at: datetime,
+    end_at: datetime,
+) -> int:
+    """Count non-2xx results in the half-open UTC interval."""
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS problem_count
+        FROM check_results
+        WHERE site_id = ?
+            AND status_group != '2xx'
+            AND checked_at >= ?
+            AND checked_at < ?
+        """,
+        (
+            site_id,
+            _to_db_datetime(start_at),
+            _to_db_datetime(end_at),
+        ),
+    ).fetchone()
+    return int(row["problem_count"])
 
 
 def cleanup_check_results_older_than(
