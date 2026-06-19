@@ -4,9 +4,9 @@ PING - внутренний инструмент мониторинга дост
 
 ## Структура Проекта
 
-- `central/` - центральное FastAPI-приложение. Сейчас содержит минимальный application и `/health`.
-- `probe/` - будущий lightweight probe agent. Сейчас это безопасный stub без сетевых запросов, локального cache/config и runtime-логики мониторинга.
-- `tests/` - базовые тесты импортов, `/health` и stub `probe`.
+- `central/` - центральное FastAPI-приложение. Сейчас содержит `/health`, SQLite persistence слой и authenticated probe API.
+- `probe/` - lightweight probe agent MVP: синхронизация config с central API, HTTP `GET` проверки без редиректов, локальный cache и очередь результатов.
+- `tests/` - базовые тесты импортов, `/health`, persistence layer, probe API и probe agent.
 
 ## Локальная Разработка
 
@@ -37,7 +37,7 @@ uvicorn central.app.main:app --host 0.0.0.0 --port 8000 --reload
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Dev-контейнер монтирует исходный код приложения и запускает FastAPI через `uvicorn --reload`. После изменения Python-файлов приложение должно автоматически перезагрузиться без ручного перезапуска контейнера или процесса.
+Dev-контейнер монтирует `central/`, `probe/` и `tests/`, затем запускает FastAPI через `uvicorn --reload`. После изменения Python-файлов в `central/` приложение должно автоматически перезагрузиться без ручного перезапуска контейнера или процесса.
 
 ### Проверка Health Endpoint
 
@@ -65,18 +65,61 @@ Invoke-RestMethod http://localhost:8000/health
 pytest
 ```
 
-### Запуск Probe Stub
+### Запуск Probe Agent MVP
 
-Stub можно запустить без реальных сетевых запросов:
+Probe agent читает локальный JSON config. Минимальный пример:
+
+```json
+{
+  "probe_id": "ru-dc-1",
+  "probe_token": "dev-token-ru-dc-1",
+  "central_api_url": "http://localhost:8000",
+  "storage_dir": "data/probe"
+}
+```
+
+`probe_token` в реальном окружении является секретом, поэтому локальный config не должен попадать в Git.
+
+MVP поддерживает один цикл `sync -> check -> submit`:
 
 ```powershell
-python -m probe.app.cli
+python -m probe.app.cli --config .\probe-config.json --once
 ```
 
 После установки проекта в editable-режиме также доступен console script:
 
 ```powershell
-ping-probe
+ping-probe --config .\probe-config.json --once
 ```
 
-Ожидаемый смысл вывода: `probe` пока является stub и не выполняет реальные HTTP-проверки сайтов, синхронизацию с central API, локальный cache/config или очередь результатов.
+В `storage_dir` сохраняются:
+
+- `sites-config.json` - последний успешно синхронизированный config сайтов;
+- `results-queue.json` - результаты, которые не удалось отправить в central API.
+
+## SQLite Persistence
+
+SQLite schema и базовые операции находятся в `central/app/persistence.py`.
+
+Слой данных умеет:
+
+- инициализировать базу без ручных SQL-шагов;
+- хранить `Site`, `Probe` и `CheckResult`;
+- создавать индексы для будущих dashboard-запросов по `site_id`, `probe_id`, `checked_at` и `site_id + checked_at`;
+- добавлять dev seed с примером сайта и трех datacenter probes без реальных секретов.
+
+## Central Probe API
+
+Probe API находится под prefix `/api/probe`.
+
+- `GET /api/probe/config` - возвращает активные сайты и параметры проверки.
+- `POST /api/probe/results` - принимает batch результатов проверок и сохраняет их в SQLite.
+
+Оба endpoint требуют заголовки:
+
+```text
+X-Probe-Id: ru-dc-1
+Authorization: Bearer <probe-token>
+```
+
+Токены хранятся в базе только как SHA-256 hash. Dev seed использует placeholder tokens вида `dev-token-<probe_id>` только для локальной проверки.
