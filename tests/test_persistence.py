@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from central.app.persistence import (
     cleanup_check_results_older_than,
@@ -10,8 +10,10 @@ from central.app.persistence import (
     initialize_database,
     list_active_sites,
     list_check_results_for_site_on_date,
+    list_check_results_for_site_in_period,
     list_check_results_for_site,
     list_recent_problem_results,
+    list_problem_results_for_site_in_period,
     seed_development_data,
 )
 
@@ -167,6 +169,74 @@ def test_dashboard_queries_filter_results_by_selected_date(tmp_path) -> None:
 
     assert daily_results == [selected_day_ok, selected_day_problem]
     assert recent_problems == [selected_day_problem]
+
+
+def test_period_queries_use_half_open_utc_boundaries(tmp_path) -> None:
+    connection = connect_database(tmp_path / "central.sqlite3")
+    initialize_database(connection)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    probe = create_probe(
+        connection,
+        probe_id="ru-dc-1",
+        name="Russia Datacenter",
+        region="Russia",
+        token_hash="test-token-hash",
+    )
+    start_at = datetime(2026, 6, 18, 21, 0, tzinfo=UTC)
+    end_at = datetime(2026, 6, 19, 21, 0, tzinfo=UTC)
+
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=start_at - timedelta(microseconds=1),
+        result_status="server_error",
+        status_group="5xx",
+        http_status=500,
+    )
+    first = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=start_at,
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+    )
+    last_problem = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=end_at - timedelta(microseconds=1),
+        result_status="network_error",
+        status_group="network_error",
+        error_type="timeout",
+    )
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=end_at,
+        result_status="server_error",
+        status_group="5xx",
+        http_status=503,
+    )
+
+    results = list_check_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    problems = list_problem_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+    assert results == [first, last_problem]
+    assert problems == [last_problem]
 
 
 def test_cleanup_check_results_older_than_deletes_only_expired_raw_results(tmp_path) -> None:

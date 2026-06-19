@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from datetime import UTC, date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from html import escape
 from typing import Annotated
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -23,10 +25,10 @@ from central.app.models import CheckResult, Probe, Site
 from central.app.persistence import (
     get_site,
     list_active_sites,
-    list_check_results_for_site_on_date,
+    list_check_results_for_site_in_period,
     list_enabled_probes,
     list_latest_results_for_site_by_probe,
-    list_recent_problem_results,
+    list_problem_results_for_site_in_period,
     seed_development_data,
 )
 from central.app.probe_api import DatabaseConnection
@@ -35,6 +37,19 @@ from central.app.probe_api import DatabaseConnection
 router = APIRouter(tags=["dashboard"])
 RETENTION_DAYS = 90
 STATUS_GROUPS = ("2xx", "3xx", "4xx", "5xx", "network_error", "probe_error")
+MSK = ZoneInfo("Europe/Moscow")
+DEFAULT_FROM_TIME = time(0, 0)
+DEFAULT_TO_TIME = time(23, 59)
+
+
+@dataclass(frozen=True)
+class DashboardPeriod:
+    selected_date: date
+    from_time: time
+    to_time: time
+    start_at: datetime
+    end_at: datetime
+    message: str | None = None
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -98,7 +113,9 @@ def dashboard(
     request: Request,
     connection: DatabaseConnection,
     site_id: Annotated[int | None, Query(gt=0)] = None,
-    selected_date: Annotated[date | None, Query(alias="date")] = None,
+    date_value: Annotated[str | None, Query(alias="date")] = None,
+    from_time: Annotated[str | None, Query()] = None,
+    to_time: Annotated[str | None, Query()] = None,
 ) -> Response:
     username = _current_admin_username(request)
     if username is None:
@@ -108,28 +125,36 @@ def dashboard(
     sites = list_active_sites(connection)
     selected_site = _select_site(connection, sites=sites, site_id=site_id)
     probes = list_enabled_probes(connection)
-    today = datetime.now(UTC).date()
+    today = datetime.now(MSK).date()
     min_date = today - timedelta(days=RETENTION_DAYS - 1)
-    chart_date = _bounded_date(selected_date or today, min_date=min_date, max_date=today)
+    period = _parse_dashboard_period(
+        date_value=date_value,
+        from_time_value=from_time,
+        to_time_value=to_time,
+        min_date=min_date,
+        max_date=today,
+    )
     latest_results = (
         list_latest_results_for_site_by_probe(connection, site_id=selected_site.id)
         if selected_site is not None
         else {}
     )
-    daily_results = (
-        list_check_results_for_site_on_date(
+    period_results = (
+        list_check_results_for_site_in_period(
             connection,
             site_id=selected_site.id,
-            selected_date=chart_date,
+            start_at=period.start_at,
+            end_at=period.end_at,
         )
         if selected_site is not None
         else []
     )
     recent_problems = (
-        list_recent_problem_results(
+        list_problem_results_for_site_in_period(
             connection,
             site_id=selected_site.id,
-            selected_date=chart_date,
+            start_at=period.start_at,
+            end_at=period.end_at,
         )
         if selected_site is not None
         else []
@@ -142,9 +167,9 @@ def dashboard(
             selected_site=selected_site,
             probes=probes,
             latest_results=latest_results,
-            daily_results=daily_results,
+            period_results=period_results,
             recent_problems=recent_problems,
-            selected_date=chart_date,
+            period=period,
             min_date=min_date,
             max_date=today,
         )
@@ -183,6 +208,73 @@ def _select_site(
 
 def _bounded_date(value: date, *, min_date: date, max_date: date) -> date:
     return min(max(value, min_date), max_date)
+
+
+def _parse_dashboard_period(
+    *,
+    date_value: str | None,
+    from_time_value: str | None,
+    to_time_value: str | None,
+    min_date: date,
+    max_date: date,
+) -> DashboardPeriod:
+    messages: list[str] = []
+    try:
+        selected_date = date.fromisoformat(date_value) if date_value else max_date
+    except ValueError:
+        selected_date = max_date
+        messages.append("Invalid date was reset to today.")
+
+    bounded_date = _bounded_date(selected_date, min_date=min_date, max_date=max_date)
+    if bounded_date != selected_date:
+        messages.append("Date was limited to the available retention window.")
+    selected_date = bounded_date
+
+    selected_from = _parse_time_value(
+        from_time_value,
+        default=DEFAULT_FROM_TIME,
+        field_name="From",
+        messages=messages,
+    )
+    selected_to = _parse_time_value(
+        to_time_value,
+        default=DEFAULT_TO_TIME,
+        field_name="To",
+        messages=messages,
+    )
+    if selected_from > selected_to:
+        selected_from = DEFAULT_FROM_TIME
+        selected_to = DEFAULT_TO_TIME
+        messages.append("From must not be later than To; the full day was selected.")
+
+    local_start = datetime.combine(selected_date, selected_from, tzinfo=MSK)
+    local_end = datetime.combine(selected_date, selected_to, tzinfo=MSK) + timedelta(
+        minutes=1
+    )
+    return DashboardPeriod(
+        selected_date=selected_date,
+        from_time=selected_from,
+        to_time=selected_to,
+        start_at=local_start.astimezone(UTC),
+        end_at=local_end.astimezone(UTC),
+        message=" ".join(messages) or None,
+    )
+
+
+def _parse_time_value(
+    value: str | None,
+    *,
+    default: time,
+    field_name: str,
+    messages: list[str],
+) -> time:
+    if not value:
+        return default
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError:
+        messages.append(f"Invalid {field_name} time was reset.")
+        return default
 
 
 def _render_login_page(*, error: str | None = None) -> str:
@@ -225,17 +317,17 @@ def _render_dashboard_page(
     selected_site: Site | None,
     probes: list[Probe],
     latest_results: dict[str, CheckResult],
-    daily_results: list[CheckResult],
+    period_results: list[CheckResult],
     recent_problems: list[CheckResult],
-    selected_date: date,
+    period: DashboardPeriod,
     min_date: date,
     max_date: date,
 ) -> str:
-    sites_html = _render_sites(sites, selected_site)
+    sites_html = _render_sites(sites, selected_site, period)
     statuses_html = _render_statuses(probes, latest_results)
-    date_form_html = _render_date_form(selected_site, selected_date, min_date, max_date)
-    chart_html = _render_response_time_chart(daily_results, probes)
-    details_html = _render_daily_details(daily_results, probes)
+    date_form_html = _render_date_form(selected_site, period, min_date, max_date)
+    chart_html = _render_response_time_chart(period_results, probes)
+    details_html = _render_daily_details(period_results, probes)
     problems_html = _render_recent_problems(recent_problems, probes)
     selected_name = selected_site.name if selected_site is not None else "No active site"
     selected_url = selected_site.url if selected_site is not None else ""
@@ -293,6 +385,7 @@ def _render_dashboard_page(
     .point.status-point-probe_error {{ fill: #722ed1; }}
     .status-key {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
     .muted {{ color: #667085; }}
+    .error {{ padding: 10px; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; border-radius: 6px; }}
     .logout {{ background: none; border: 1px solid #b8c2d6; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
   </style>
 </head>
@@ -324,7 +417,9 @@ def _render_dashboard_page(
 </html>"""
 
 
-def _render_sites(sites: list[Site], selected_site: Site | None) -> str:
+def _render_sites(
+    sites: list[Site], selected_site: Site | None, period: DashboardPeriod
+) -> str:
     if not sites:
         return '<p class="muted">No active sites configured.</p>'
 
@@ -332,8 +427,16 @@ def _render_sites(sites: list[Site], selected_site: Site | None) -> str:
     selected_id = selected_site.id if selected_site is not None else None
     for site in sites:
         css_class = "site-link selected" if site.id == selected_id else "site-link"
+        query = urlencode(
+            {
+                "site_id": site.id,
+                "date": period.selected_date.isoformat(),
+                "from_time": period.from_time.strftime("%H:%M"),
+                "to_time": period.to_time.strftime("%H:%M"),
+            }
+        )
         items.append(
-            f'<li><a class="{css_class}" href="/dashboard?site_id={site.id}">'
+            f'<li><a class="{css_class}" href="/dashboard?{escape(query, quote=True)}">'
             f"{escape(site.name)}</a></li>"
         )
     return f"<ul>{''.join(items)}</ul>"
@@ -384,7 +487,7 @@ def _render_statuses(
 
 def _render_date_form(
     selected_site: Site | None,
-    selected_date: date,
+    period: DashboardPeriod,
     min_date: date,
     max_date: date,
 ) -> str:
@@ -393,12 +496,24 @@ def _render_date_form(
         if selected_site is not None
         else ""
     )
+    message_html = (
+        f'<p class="error">{escape(period.message)}</p>' if period.message else ""
+    )
     return f"""
+      {message_html}
       <form class="toolbar" method="get" action="/dashboard">
         {site_input}
         <label for="date">Date
-          <input id="date" name="date" type="date" value="{selected_date.isoformat()}"
+          <input id="date" name="date" type="date" value="{period.selected_date.isoformat()}"
             min="{min_date.isoformat()}" max="{max_date.isoformat()}">
+        </label>
+        <label for="from_time">From (MSK)
+          <input id="from_time" name="from_time" type="time"
+            value="{period.from_time.strftime('%H:%M')}" required>
+        </label>
+        <label for="to_time">To (MSK)
+          <input id="to_time" name="to_time" type="time"
+            value="{period.to_time.strftime('%H:%M')}" required>
         </label>
         <button type="submit">Show</button>
       </form>
@@ -421,7 +536,7 @@ def _render_response_time_chart(
         result for result in daily_results if result.response_time_ms is not None
     ]
     if not chartable_results:
-        return '<p class="muted">No response time data for the selected date.</p>'
+        return '<p class="muted">No response time data for the selected period.</p>'
 
     width = 900
     height = 320
@@ -440,9 +555,9 @@ def _render_response_time_chart(
 
     def x_position(value: datetime) -> float:
         seconds = (
-            value.astimezone(UTC).hour * 3600
-            + value.astimezone(UTC).minute * 60
-            + value.astimezone(UTC).second
+            value.astimezone(MSK).hour * 3600
+            + value.astimezone(MSK).minute * 60
+            + value.astimezone(MSK).second
         )
         return left + (seconds / 86399) * plot_width
 
@@ -452,7 +567,7 @@ def _render_response_time_chart(
     grid_lines = []
     for hour in (0, 6, 12, 18, 24):
         x = left + (hour / 24) * plot_width
-        label = f"{hour:02d}:00" if hour < 24 else "24:00"
+        label = (f"{hour:02d}:00" if hour < 24 else "24:00") + " MSK"
         grid_lines.append(
             f'<line class="grid" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_height}"></line>'
             f'<text x="{x:.1f}" y="{height - 12}" text-anchor="middle" fill="#667085" font-size="12">{label}</text>'
@@ -518,7 +633,7 @@ def _render_daily_details(
     probes: list[Probe],
 ) -> str:
     if not daily_results:
-        return '<p class="muted">No check results for the selected date.</p>'
+        return '<p class="muted">No check results for the selected period.</p>'
 
     probe_names = {probe.id: probe.name for probe in probes}
     rows = []
@@ -540,7 +655,7 @@ def _render_daily_details(
         )
 
     return (
-        "<table><thead><tr><th>Timestamp</th><th>Probe</th><th>Status</th>"
+        "<table><thead><tr><th>Timestamp (MSK)</th><th>Probe</th><th>Status</th>"
         "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
@@ -573,7 +688,7 @@ def _render_recent_problems(
         )
 
     return (
-        "<table><thead><tr><th>Timestamp</th><th>Probe</th><th>Status</th>"
+        "<table><thead><tr><th>Timestamp (MSK)</th><th>Probe</th><th>Status</th>"
         "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
@@ -601,4 +716,4 @@ def _probe_css_class(probe_id: str) -> str:
 
 
 def _format_datetime(value: datetime) -> str:
-    return value.isoformat(timespec="seconds")
+    return f"{value.astimezone(MSK).strftime('%Y-%m-%d %H:%M:%S')} MSK"

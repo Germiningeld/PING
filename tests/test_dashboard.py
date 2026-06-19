@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
 from central.app.auth import ADMIN_SESSION_COOKIE, hash_admin_password
+from central.app.dashboard import _parse_dashboard_period
 from central.app.main import app
 from central.app.persistence import (
     connect_database,
@@ -23,7 +25,7 @@ def dashboard_client(tmp_path, monkeypatch):
     connection = connect_database(database_path)
     initialize_database(connection)
     site = create_site(connection, name="Example", url="https://example.com/")
-    selected_date = datetime.now(UTC).date()
+    selected_date = datetime.now(ZoneInfo("Europe/Moscow")).date()
     create_probe(
         connection,
         probe_id="ru-dc-1",
@@ -163,14 +165,107 @@ def test_dashboard_can_show_selected_date_history(dashboard_client) -> None:
         data={"username": "admin", "password": "correct-password"},
         follow_redirects=False,
     )
-    selected_date = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    selected_date = (
+        datetime.now(ZoneInfo("Europe/Moscow")).date() - timedelta(days=1)
+    ).isoformat()
     dashboard_response = dashboard_client.get(f"/dashboard?date={selected_date}")
 
     assert dashboard_response.status_code == 200
     assert f'value="{selected_date}"' in dashboard_response.text
     assert "network_error" in dashboard_response.text
     assert "timeout" in dashboard_response.text
-    assert "No response time data for the selected date." in dashboard_response.text
+    assert "No response time data for the selected period." in dashboard_response.text
+
+
+def test_dashboard_period_converts_full_msk_day_to_utc() -> None:
+    period = _parse_dashboard_period(
+        date_value="2026-06-19",
+        from_time_value="00:00",
+        to_time_value="23:59",
+        min_date=datetime(2026, 1, 1, tzinfo=UTC).date(),
+        max_date=datetime(2026, 6, 19, tzinfo=UTC).date(),
+    )
+
+    assert period.start_at == datetime(2026, 6, 18, 21, 0, tzinfo=UTC)
+    assert period.end_at == datetime(2026, 6, 19, 21, 0, tzinfo=UTC)
+    assert period.message is None
+
+
+def test_dashboard_period_converts_selected_msk_minutes_to_utc() -> None:
+    period = _parse_dashboard_period(
+        date_value="2026-06-19",
+        from_time_value="12:30",
+        to_time_value="14:45",
+        min_date=datetime(2026, 1, 1, tzinfo=UTC).date(),
+        max_date=datetime(2026, 6, 19, tzinfo=UTC).date(),
+    )
+
+    assert period.start_at == datetime(2026, 6, 19, 9, 30, tzinfo=UTC)
+    assert period.end_at == datetime(2026, 6, 19, 11, 46, tzinfo=UTC)
+
+
+def test_dashboard_period_limits_date_to_retention_window() -> None:
+    min_date = datetime(2026, 3, 22, tzinfo=UTC).date()
+    max_date = datetime(2026, 6, 19, tzinfo=UTC).date()
+
+    future = _parse_dashboard_period(
+        date_value="2026-06-20",
+        from_time_value=None,
+        to_time_value=None,
+        min_date=min_date,
+        max_date=max_date,
+    )
+    expired = _parse_dashboard_period(
+        date_value="2026-03-21",
+        from_time_value=None,
+        to_time_value=None,
+        min_date=min_date,
+        max_date=max_date,
+    )
+
+    assert future.selected_date == max_date
+    assert expired.selected_date == min_date
+    assert future.message == "Date was limited to the available retention window."
+    assert expired.message == "Date was limited to the available retention window."
+
+
+def test_dashboard_safely_normalizes_invalid_period_parameters(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+
+    response = dashboard_client.get(
+        "/dashboard?date=not-a-date&from_time=18:00&to_time=09:00"
+    )
+
+    assert response.status_code == 200
+    assert 'name="from_time" type="time"\n            value="00:00"' in response.text
+    assert 'name="to_time" type="time"\n            value="23:59"' in response.text
+    assert "Invalid date was reset to today." in response.text
+    assert "From must not be later than To" in response.text
+
+
+def test_dashboard_period_filters_graph_details_and_problems(dashboard_client) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    selected_date = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+
+    response = dashboard_client.get(
+        f"/dashboard?date={selected_date}&from_time=00:00&to_time=00:00"
+    )
+
+    assert response.status_code == 200
+    assert "No response time data for the selected period." in response.text
+    assert "No check results for the selected period." in response.text
+    assert "No recent problems for the selected site." in response.text
+    assert f"date={selected_date}&amp;from_time=00%3A00&amp;to_time=00%3A00" in response.text
 
 
 def test_admin_can_logout(dashboard_client) -> None:

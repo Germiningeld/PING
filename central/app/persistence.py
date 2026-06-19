@@ -255,6 +255,28 @@ def list_check_results_for_site_on_date(
     return [_row_to_check_result(row) for row in rows]
 
 
+def list_check_results_for_site_in_period(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    start_at: datetime,
+    end_at: datetime,
+) -> list[CheckResult]:
+    """Return results in the half-open UTC interval [start_at, end_at)."""
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM check_results
+        WHERE site_id = ?
+            AND checked_at >= ?
+            AND checked_at < ?
+        ORDER BY checked_at, probe_id, id
+        """,
+        (site_id, _to_db_datetime(start_at), _to_db_datetime(end_at)),
+    ).fetchall()
+    return [_row_to_check_result(row) for row in rows]
+
+
 def list_latest_results_for_site_by_probe(
     connection: sqlite3.Connection,
     *,
@@ -312,6 +334,36 @@ def list_recent_problem_results(
         LIMIT ?
         """,
         parameters,
+    ).fetchall()
+    return [_row_to_check_result(row) for row in rows]
+
+
+def list_problem_results_for_site_in_period(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    start_at: datetime,
+    end_at: datetime,
+    limit: int = 10,
+) -> list[CheckResult]:
+    """Return newest non-2xx results in the half-open UTC interval."""
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM check_results
+        WHERE site_id = ?
+            AND status_group != '2xx'
+            AND checked_at >= ?
+            AND checked_at < ?
+        ORDER BY checked_at DESC, id DESC
+        LIMIT ?
+        """,
+        (
+            site_id,
+            _to_db_datetime(start_at),
+            _to_db_datetime(end_at),
+            limit,
+        ),
     ).fetchall()
     return [_row_to_check_result(row) for row in rows]
 
