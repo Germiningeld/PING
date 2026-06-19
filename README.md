@@ -4,7 +4,7 @@ PING - внутренний инструмент мониторинга дост
 
 ## Структура Проекта
 
-- `central/` - центральное FastAPI-приложение. Сейчас содержит `/health`, SQLite persistence слой и authenticated probe API.
+- `central/` - центральное FastAPI-приложение. Сейчас содержит `/health`, SQLite persistence слой, authenticated probe API и admin dashboard shell.
 - `probe/` - lightweight probe agent MVP: синхронизация config с central API, HTTP `GET` проверки без редиректов, локальный cache и очередь результатов.
 - `tests/` - базовые тесты импортов, `/health`, persistence layer, probe API и probe agent.
 
@@ -58,6 +58,33 @@ http://localhost:8000/health
 ```powershell
 Invoke-RestMethod http://localhost:8000/health
 ```
+
+### Admin Dashboard
+
+Dashboard доступен по адресу:
+
+```text
+http://localhost:8000/dashboard
+```
+
+Неавторизованный пользователь будет перенаправлен на `/login`.
+
+Для локального запуска задайте admin credentials и session secret через environment variables или локальный `.env` файл на основе `.env.example`:
+
+```text
+PING_ADMIN_USERNAME=admin
+PING_ADMIN_PASSWORD_HASH=<pbkdf2-password-hash>
+PING_ADMIN_SESSION_SECRET=<random-session-secret>
+PING_COOKIE_SECURE=false
+```
+
+Сгенерировать hash пароля можно через helper из проекта:
+
+```powershell
+python -c "from central.app.auth import hash_admin_password; print(hash_admin_password('replace-with-local-password'))"
+```
+
+Не коммитьте реальные значения `PING_ADMIN_PASSWORD_HASH` и `PING_ADMIN_SESSION_SECRET`.
 
 ### Проверки
 

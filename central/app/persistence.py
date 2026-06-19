@@ -210,6 +210,13 @@ def list_active_sites(connection: sqlite3.Connection) -> list[Site]:
     return [_row_to_site(row) for row in rows]
 
 
+def list_enabled_probes(connection: sqlite3.Connection) -> list[Probe]:
+    rows = connection.execute(
+        "SELECT * FROM probes WHERE enabled = 1 ORDER BY id"
+    ).fetchall()
+    return [_row_to_probe(row) for row in rows]
+
+
 def list_check_results_for_site(
     connection: sqlite3.Connection,
     *,
@@ -222,6 +229,56 @@ def list_check_results_for_site(
         ORDER BY checked_at, id
         """,
         (site_id,),
+    ).fetchall()
+    return [_row_to_check_result(row) for row in rows]
+
+
+def list_latest_results_for_site_by_probe(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+) -> dict[str, CheckResult]:
+    rows = connection.execute(
+        """
+        SELECT cr.*
+        FROM check_results cr
+        INNER JOIN (
+            SELECT probe_id, MAX(checked_at) AS latest_checked_at
+            FROM check_results
+            WHERE site_id = ?
+            GROUP BY probe_id
+        ) latest
+            ON latest.probe_id = cr.probe_id
+            AND latest.latest_checked_at = cr.checked_at
+        WHERE cr.site_id = ?
+        ORDER BY cr.probe_id, cr.id DESC
+        """,
+        (site_id, site_id),
+    ).fetchall()
+
+    latest_results: dict[str, CheckResult] = {}
+    for row in rows:
+        result = _row_to_check_result(row)
+        latest_results.setdefault(result.probe_id, result)
+    return latest_results
+
+
+def list_recent_problem_results(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    limit: int = 10,
+) -> list[CheckResult]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM check_results
+        WHERE site_id = ?
+            AND status_group != '2xx'
+        ORDER BY checked_at DESC, id DESC
+        LIMIT ?
+        """,
+        (site_id, limit),
     ).fetchall()
     return [_row_to_check_result(row) for row in rows]
 
