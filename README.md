@@ -1,6 +1,24 @@
 # PING
 
-PING - внутренний инструмент мониторинга доступности клиентских сайтов.
+PING - внутренний инструмент мониторинга доступности клиентских сайтов из нескольких точек наблюдения. Central application собирает результаты от probe agents, хранит raw checks в SQLite и показывает admin-only dashboard с текущим статусом, историей за выбранную дату и диагностикой ошибок.
+
+Проект готов как MVP/demo и Docker Compose example. Реальный production deployment, домен, DNS, HTTPS, reverse proxy и production secrets не настраиваются этим repository автоматически.
+
+## MVP Состав
+
+- Central FastAPI application с `/health`, admin login, dashboard, authenticated probe API и retention raw `check_results`.
+- Probe agent для синхронизации config, HTTP `GET` проверок без редиректов, локального cache и очереди неотправленных results.
+- SQLite persistence для MVP-объема: до 10 sites, 3 datacenter probes, одна проверка в минуту.
+- Dockerfile и Docker Compose examples для central и probe.
+- `.env.example` и `configs/probe-config.example.json` без реальных секретов.
+- Public deployment runbook: `DEPLOYMENT.md`.
+
+## MVP Ограничения
+
+- Нет automatic production deployment.
+- Нет настройки реального домена, DNS, HTTPS или reverse proxy.
+- Нет notifications, monitoring, backup implementation и UI управления sites/probes.
+- Секреты должны храниться только в локальных `.env`/config файлах и не коммититься.
 
 ## Структура Проекта
 
@@ -10,6 +28,7 @@ PING - внутренний инструмент мониторинга дост
 - `docker-compose.central.yml` - пример запуска central через Docker Compose.
 - `docker-compose.probe.yml` - пример запуска probe через Docker Compose.
 - `configs/probe-config.example.json` - пример локального config для probe без секретов.
+- `DEPLOYMENT.md` - checklist публикации и runbook будущего ручного запуска без production secrets.
 
 ## Локальная Разработка
 
@@ -65,6 +84,8 @@ Invoke-RestMethod http://localhost:8000/health
 ## Docker Compose Запуск MVP
 
 Проект содержит отдельные примеры для central и probe. Они предназначены для воспроизводимого запуска MVP, но не настраивают реальный домен, HTTPS или production deployment.
+
+Для публикации repository и будущего серверного запуска сначала прочитайте `DEPLOYMENT.md`: там перечислены pre-publication checklist, нужные доступы, запрещенные к передаче секреты, ручной порядок запуска, проверки, restart/stop и rollback-команды.
 
 ### Central
 
@@ -164,7 +185,9 @@ python -c "from central.app.auth import hash_admin_password; print(hash_admin_pa
 ### Проверки
 
 ```powershell
-pytest
+python -m pytest
+docker compose -f docker-compose.central.yml config
+docker compose -f docker-compose.probe.yml config
 ```
 
 ### Запуск Probe Agent MVP
