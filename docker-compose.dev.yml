@@ -1,0 +1,23 @@
+services:
+  central:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./central:/app/central
+      - ./probe:/app/probe
+      - ./tests:/app/tests
+    command:
+      - uvicorn
+      - central.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/central
