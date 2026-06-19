@@ -10,7 +10,9 @@ from central.app.auth import ADMIN_SESSION_COOKIE, hash_admin_password
 from central.app.dashboard import (
     DashboardPeriod,
     _parse_dashboard_period,
+    _probe_colors,
     _render_probe_period_summary,
+    _render_response_time_chart,
     _summarize_probe_period,
 )
 from central.app.main import app
@@ -170,9 +172,9 @@ def test_admin_can_login_and_see_dashboard_shell(dashboard_client) -> None:
     assert "2xx" in dashboard_response.text
     assert "200" in dashboard_response.text
     assert "Response Time History" in dashboard_response.text
-    assert "aria-label=\"Response time by probe for selected date\"" in dashboard_response.text
-    assert "probe-ru-dc-1" in dashboard_response.text
-    assert "probe-eu-dc-1" in dashboard_response.text
+    assert "aria-label=\"Response time by probe for selected period\"" in dashboard_response.text
+    assert 'data-probe-toggle="ru-dc-1"' in dashboard_response.text
+    assert 'data-probe-toggle="eu-dc-1"' in dashboard_response.text
     assert "503" in dashboard_response.text
 
 
@@ -218,7 +220,8 @@ def test_dashboard_can_show_selected_date_history(dashboard_client) -> None:
     assert f'value="{selected_date}"' in dashboard_response.text
     assert "network_error" in dashboard_response.text
     assert "timeout" in dashboard_response.text
-    assert "No response time data for the selected period." in dashboard_response.text
+    assert 'class="event-strip-line"' in dashboard_response.text
+    assert 'data-status-group="network_error"' in dashboard_response.text
 
 
 def test_dashboard_period_converts_full_msk_day_to_utc() -> None:
@@ -420,6 +423,119 @@ def test_probe_stale_threshold_is_strictly_older_than_three_minutes() -> None:
 
     assert html.count('<span class="stale">stale</span>') == 1
     assert "Overall uptime: no data for the selected period." in html
+
+
+def test_probe_chart_colors_are_unique_stable_and_not_tied_to_demo_ids() -> None:
+    probes = [_probe("central"), _probe("usa"), _probe("eu"), _probe("custom-probe")]
+
+    colors = _probe_colors(probes)
+    reordered_colors = _probe_colors(list(reversed(probes)))
+
+    assert colors == reordered_colors
+    assert len(set(colors.values())) == len(probes)
+    assert all(color.startswith("hsl(") for color in colors.values())
+
+
+def test_response_chart_renders_filters_problem_markers_and_error_strip() -> None:
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    probes = [_probe("central"), _probe("usa")]
+    results = [
+        _result(
+            1,
+            probe_id="central",
+            checked_at=start_at,
+            status_group="2xx",
+            response_time_ms=100,
+        ),
+        _result(
+            2,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=1),
+            status_group="5xx",
+            response_time_ms=500,
+        ),
+        _result(
+            3,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=2),
+            status_group="network_error",
+        ),
+    ]
+
+    html = _render_response_time_chart(results, probes)
+
+    assert 'data-response-chart' in html
+    assert html.count('data-probe-toggle=') == 2
+    assert html.count('data-status-toggle=') == 6
+    assert 'data-status-group="5xx"' in html
+    assert 'class="problem-marker status-point-5xx"' in html
+    assert 'class="problem-marker status-point-network_error"' in html
+    assert 'class="point-hit"' in html
+    assert html.count('class="series-segment"') == 1
+
+
+def test_response_chart_does_not_connect_hidden_results_or_large_gaps() -> None:
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    results = [
+        _result(
+            1,
+            probe_id="central",
+            checked_at=start_at,
+            status_group="2xx",
+            response_time_ms=100,
+        ),
+        _result(
+            2,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=1),
+            status_group="4xx",
+            response_time_ms=400,
+        ),
+        _result(
+            3,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=2),
+            status_group="probe_error",
+        ),
+        _result(
+            4,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=3),
+            status_group="2xx",
+            response_time_ms=120,
+        ),
+        _result(
+            5,
+            probe_id="central",
+            checked_at=start_at + timedelta(minutes=6),
+            status_group="2xx",
+            response_time_ms=130,
+        ),
+    ]
+
+    html = _render_response_time_chart(results, [_probe("central")])
+
+    assert html.count('class="series-segment"') == 1
+    assert 'data-statuses="2xx 4xx"' in html
+    assert 'data-statuses="4xx 2xx"' not in html
+    assert 'data-statuses="2xx 2xx"' not in html
+
+
+def test_response_chart_filters_persist_for_future_page_refreshes(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    response = dashboard_client.get("/dashboard")
+
+    assert 'data-status-toggle="2xx" checked' in response.text
+    assert "ping-dashboard-chart-filters-v1" in response.text
+    assert "localStorage.setItem(storageKey" in response.text
+    assert 'item.setAttribute("hidden", "")' in response.text
+    assert 'item.removeAttribute("hidden")' in response.text
 
 
 def test_admin_can_logout(dashboard_client) -> None:

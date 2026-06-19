@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from hashlib import sha256
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -389,22 +390,23 @@ def _render_dashboard_page(
     .chart {{ width: 100%; height: auto; min-height: 280px; overflow: visible; }}
     .axis {{ stroke: #b8c2d6; stroke-width: 1; }}
     .grid {{ stroke: #e6eaf2; stroke-width: 1; }}
-    .series {{ fill: none; stroke-width: 2.5; }}
-    .point {{ stroke: #fff; stroke-width: 1.5; }}
+    .series-segment {{ fill: none; stroke-width: 1.25; stroke-linecap: round; }}
+    .point-hit {{ fill: transparent; stroke: none; pointer-events: all; }}
+    .problem-marker {{ stroke: #fff; stroke-width: 1.5; pointer-events: all; }}
     .legend {{ display: flex; flex-wrap: wrap; gap: 10px 16px; margin: 12px 0; }}
-    .legend-item {{ display: inline-flex; gap: 6px; align-items: center; }}
+    .legend-item, .status-toggle {{ display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid #b8c2d6; border-radius: 999px; background: #fff; color: inherit; cursor: pointer; }}
+    .legend-item[aria-pressed="false"] {{ opacity: 0.45; text-decoration: line-through; }}
     .swatch {{ width: 12px; height: 12px; border-radius: 999px; display: inline-block; }}
-    .probe-ru-dc-1, .swatch-ru-dc-1 {{ stroke: #155eef; background: #155eef; }}
-    .probe-eu-dc-1, .swatch-eu-dc-1 {{ stroke: #13a8a8; background: #13a8a8; }}
-    .probe-us-dc-1, .swatch-us-dc-1 {{ stroke: #722ed1; background: #722ed1; }}
-    .probe-default, .swatch-default {{ stroke: #475467; background: #475467; }}
-    .point.status-point-2xx {{ fill: #52c41a; }}
-    .point.status-point-3xx {{ fill: #fa8c16; }}
-    .point.status-point-4xx {{ fill: #f5222d; }}
-    .point.status-point-5xx {{ fill: #a8071a; }}
-    .point.status-point-network_error {{ fill: #5c0011; }}
-    .point.status-point-probe_error {{ fill: #722ed1; }}
+    .status-point-3xx {{ fill: #fa8c16; }}
+    .status-point-4xx {{ fill: #f5222d; }}
+    .status-point-5xx {{ fill: #a8071a; }}
+    .status-point-network_error {{ fill: #5c0011; }}
+    .status-point-probe_error {{ fill: #722ed1; }}
     .status-key {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
+    .status-filters {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
+    .event-strip-label {{ fill: #667085; font-size: 12px; }}
+    .event-strip-line {{ stroke: #b8c2d6; stroke-width: 1; }}
+    [hidden] {{ display: none !important; }}
     .muted {{ color: #667085; }}
     .error {{ padding: 10px; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; border-radius: 6px; }}
     .logout {{ background: none; border: 1px solid #b8c2d6; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
@@ -434,6 +436,57 @@ def _render_dashboard_page(
       {problems_html}
     </section>
   </main>
+  <script>
+    (() => {{
+      const chart = document.querySelector("[data-response-chart]");
+      if (!chart) return;
+      const storageKey = "ping-dashboard-chart-filters-v1";
+      let saved = {{ probes: {{}}, statuses: {{}} }};
+      try {{ saved = JSON.parse(localStorage.getItem(storageKey)) || saved; }} catch (_) {{}}
+      saved.probes ||= {{}};
+      saved.statuses ||= {{}};
+
+      const probeButtons = [...chart.querySelectorAll("[data-probe-toggle]")];
+      const statusInputs = [...chart.querySelectorAll("[data-status-toggle]")];
+      const enabled = (group, key) => saved[group][key] !== false;
+
+      function applyFilters() {{
+        probeButtons.forEach((button) => {{
+          button.setAttribute("aria-pressed", String(enabled("probes", button.dataset.probeToggle)));
+        }});
+        statusInputs.forEach((input) => {{
+          input.checked = enabled("statuses", input.dataset.statusToggle);
+        }});
+        chart.querySelectorAll("[data-filter-item]").forEach((item) => {{
+          const probeVisible = enabled("probes", item.dataset.probeId);
+          const statuses = (item.dataset.statuses || item.dataset.statusGroup || "").split(" ").filter(Boolean);
+          const statusesVisible = statuses.every((value) => enabled("statuses", value));
+          if (probeVisible && statusesVisible) {{
+            item.removeAttribute("hidden");
+          }} else {{
+            item.setAttribute("hidden", "");
+          }}
+        }});
+      }}
+
+      function persist() {{
+        try {{ localStorage.setItem(storageKey, JSON.stringify(saved)); }} catch (_) {{}}
+      }}
+
+      probeButtons.forEach((button) => button.addEventListener("click", () => {{
+        const key = button.dataset.probeToggle;
+        saved.probes[key] = !enabled("probes", key);
+        persist();
+        applyFilters();
+      }}));
+      statusInputs.forEach((input) => input.addEventListener("change", () => {{
+        saved.statuses[input.dataset.statusToggle] = input.checked;
+        persist();
+        applyFilters();
+      }}));
+      applyFilters();
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -647,22 +700,31 @@ def _render_response_time_chart(
     chartable_results = [
         result for result in daily_results if result.response_time_ms is not None
     ]
-    if not chartable_results:
+    event_results = [
+        result
+        for result in daily_results
+        if result.response_time_ms is None
+        and result.status_group in ("network_error", "probe_error")
+    ]
+    if not chartable_results and not event_results:
         return '<p class="muted">No response time data for the selected period.</p>'
 
     width = 900
-    height = 320
+    height = 360
     left = 56
     right = 24
     top = 20
-    bottom = 42
+    bottom = 82
     plot_width = width - left - right
     plot_height = height - top - bottom
-    max_response_time = max(result.response_time_ms or 0 for result in chartable_results)
+    max_response_time = max(
+        (result.response_time_ms or 0 for result in chartable_results), default=100
+    )
     max_response_time = max(max_response_time, 100)
     probe_names = {probe.id: probe.name for probe in probes}
+    probe_colors = _probe_colors(probes)
     grouped: dict[str, list[CheckResult]] = defaultdict(list)
-    for result in chartable_results:
+    for result in daily_results:
         grouped[result.probe_id].append(result)
 
     def x_position(value: datetime) -> float:
@@ -696,15 +758,35 @@ def _render_response_time_chart(
 
     series_html = []
     legend_items = []
-    for probe_id, results in grouped.items():
-        css_probe = _probe_css_class(probe_id)
+    for probe in probes:
+        probe_id = probe.id
+        results = grouped.get(probe_id, [])
         sorted_results = sorted(results, key=lambda result: result.checked_at)
-        points = " ".join(
-            f"{x_position(result.checked_at):.1f},{y_position(result.response_time_ms or 0):.1f}"
-            for result in sorted_results
-        )
-        circles = []
+        color = probe_colors[probe_id]
+        segments = []
+        for previous, current in zip(sorted_results, sorted_results[1:]):
+            gap_seconds = (current.checked_at - previous.checked_at).total_seconds()
+            if (
+                previous.response_time_ms is None
+                or current.response_time_ms is None
+                or gap_seconds < 0
+                or gap_seconds > PROBE_INTERVAL_SECONDS * 2
+            ):
+                continue
+            statuses = f"{_safe_status_css(previous.status_group)} {_safe_status_css(current.status_group)}"
+            segments.append(
+                f'<line class="series-segment" data-filter-item data-probe-id="{escape(probe_id)}" '
+                f'data-statuses="{escape(statuses)}" style="stroke:{color}" '
+                f'x1="{x_position(previous.checked_at):.1f}" '
+                f'y1="{y_position(previous.response_time_ms):.1f}" '
+                f'x2="{x_position(current.checked_at):.1f}" '
+                f'y2="{y_position(current.response_time_ms):.1f}"></line>'
+            )
+
+        markers = []
         for result in sorted_results:
+            if result.response_time_ms is None:
+                continue
             title = (
                 f"{probe_names.get(result.probe_id, result.probe_id)} "
                 f"{_format_datetime(result.checked_at)} "
@@ -712,30 +794,70 @@ def _render_response_time_chart(
                 f"{result.status_group} "
                 f"{result.http_status or result.error_type or ''}"
             )
-            circles.append(
-                f'<circle class="point status-point-{_safe_status_css(result.status_group)}" '
+            css_status = _safe_status_css(result.status_group)
+            marker_class = (
+                "point-hit"
+                if result.status_group == "2xx"
+                else f"problem-marker status-point-{css_status}"
+            )
+            marker_radius = "7" if result.status_group == "2xx" else "4"
+            markers.append(
+                f'<circle class="{marker_class}" data-filter-item data-probe-id="{escape(probe_id)}" '
+                f'data-status-group="{escape(css_status)}" '
                 f'cx="{x_position(result.checked_at):.1f}" '
-                f'cy="{y_position(result.response_time_ms or 0):.1f}" r="4">'
+                f'cy="{y_position(result.response_time_ms):.1f}" r="{marker_radius}">'
+                f"<title>{escape(title)}</title></circle>"
+            )
+        events = []
+        for result in sorted_results:
+            if (
+                result.response_time_ms is not None
+                or result.status_group not in ("network_error", "probe_error")
+            ):
+                continue
+            css_status = _safe_status_css(result.status_group)
+            title = (
+                f"{probe_names.get(result.probe_id, result.probe_id)} "
+                f"{_format_datetime(result.checked_at)} "
+                f"{result.status_group} {result.error_type or result.result_status}"
+            )
+            events.append(
+                f'<circle class="problem-marker status-point-{css_status}" data-filter-item '
+                f'data-probe-id="{escape(probe_id)}" data-status-group="{escape(css_status)}" '
+                f'cx="{x_position(result.checked_at):.1f}" cy="{top + plot_height + 32}" r="5">'
                 f"<title>{escape(title)}</title></circle>"
             )
         series_html.append(
-            f'<polyline class="series {css_probe}" points="{points}"></polyline>'
-            f"{''.join(circles)}"
+            f'<g data-probe-series="{escape(probe_id)}">'
+            f"{''.join(segments)}{''.join(markers)}{''.join(events)}</g>"
         )
         legend_items.append(
-            f'<span class="legend-item"><span class="swatch swatch-{escape(css_probe.removeprefix("probe-"))}"></span>'
-            f"{escape(probe_names.get(probe_id, probe_id))}</span>"
+            f'<button class="legend-item" type="button" data-probe-toggle="{escape(probe_id)}" aria-pressed="true">'
+            f'<span class="swatch" style="background:{color}"></span>{escape(probe.name)}</button>'
         )
 
+    status_toggles = "".join(
+        f'<label class="status-toggle"><input type="checkbox" data-status-toggle="{status_group}" checked>'
+        f'{_status_badge(status_group)}</label>'
+        for status_group in STATUS_GROUPS
+    )
+    event_strip = (
+        f'<line class="event-strip-line" x1="{left}" y1="{top + plot_height + 32}" '
+        f'x2="{left + plot_width}" y2="{top + plot_height + 32}"></line>'
+        f'<text class="event-strip-label" x="{left - 8}" y="{top + plot_height + 36}" '
+        'text-anchor="end">Errors</text>'
+    )
+
     return (
-        '<div class="chart-panel">'
+        '<div class="chart-panel" data-response-chart>'
         f'<div class="legend">{"".join(legend_items)}</div>'
+        f'<div class="status-filters" aria-label="Status group filters">{status_toggles}</div>'
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
-        'aria-label="Response time by probe for selected date">'
+        'aria-label="Response time by probe for selected period">'
         f'{"".join(grid_lines)}{"".join(y_labels)}'
         f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"></line>'
         f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"></line>'
-        f'{"".join(series_html)}'
+        f'{event_strip}{"".join(series_html)}'
         "</svg></div>"
     )
 
@@ -818,13 +940,16 @@ def _safe_status_css(status_group: str) -> str:
     return status_group if status_group in STATUS_GROUPS else "unknown"
 
 
-def _probe_css_class(probe_id: str) -> str:
-    known_probe_classes = {
-        "ru-dc-1": "probe-ru-dc-1",
-        "eu-dc-1": "probe-eu-dc-1",
-        "us-dc-1": "probe-us-dc-1",
-    }
-    return known_probe_classes.get(probe_id, "probe-default")
+def _probe_colors(probes: list[Probe]) -> dict[str, str]:
+    colors: dict[str, str] = {}
+    used_hues: set[int] = set()
+    for probe in sorted(probes, key=lambda item: item.id):
+        hue = int.from_bytes(sha256(probe.id.encode("utf-8")).digest()[:2], "big") % 360
+        while hue in used_hues:
+            hue = (hue + 47) % 360
+        used_hues.add(hue)
+        colors[probe.id] = f"hsl({hue} 68% 42%)"
+    return colors
 
 
 def _format_datetime(value: datetime) -> str:
