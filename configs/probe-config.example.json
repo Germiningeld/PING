@@ -1,0 +1,6 @@
+{
+  "probe_id": "ru-dc-1",
+  "probe_token": "replace-with-probe-token",
+  "central_api_url": "http://central.example.local:8000",
+  "storage_dir": "/app/data/probe"
+}

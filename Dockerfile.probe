@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY pyproject.toml README.md ./
+COPY central ./central
+COPY probe ./probe
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+CMD ["sh", "-c", "while true; do ping-probe --config /config/probe-config.json --once; sleep 60; done"]

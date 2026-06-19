@@ -1,6 +1,11 @@
+.git
+.agents
+.codex
 .venv
 __pycache__
-*.pyc
 .pytest_cache
+data
+*.sqlite3
+*.pyc
 .env
-.git
+probe-config.json

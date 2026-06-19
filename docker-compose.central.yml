@@ -1,0 +1,15 @@
+services:
+  central:
+    build:
+      context: .
+      dockerfile: Dockerfile.central
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - central-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  central-data:

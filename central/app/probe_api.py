@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections.abc import Generator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from central.app.auth import verify_probe_token
 from central.app.persistence import (
+    cleanup_check_results_older_than,
     connect_database,
     create_check_result,
     get_probe,
@@ -23,6 +24,7 @@ from central.app.persistence import (
 
 router = APIRouter(prefix="/api/probe", tags=["probe"])
 bearer_scheme = HTTPBearer(auto_error=False)
+DEFAULT_RETENTION_DAYS = 90
 
 
 class SiteConfigResponse(BaseModel):
@@ -171,4 +173,20 @@ def submit_probe_results(
             error_message=result.error_message,
         )
 
+    cleanup_check_results_older_than(
+        connection,
+        cutoff=datetime.now(UTC) - timedelta(days=_retention_days()),
+    )
+
     return SubmitResultsResponse(accepted=len(payload.results))
+
+
+def _retention_days() -> int:
+    raw_value = os.getenv("PING_RETENTION_DAYS")
+    if raw_value is None:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
+    return value if value > 0 else DEFAULT_RETENTION_DAYS

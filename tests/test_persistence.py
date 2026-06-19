@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime
 
 from central.app.persistence import (
+    cleanup_check_results_older_than,
     get_probe,
     connect_database,
     create_check_result,
@@ -166,6 +167,63 @@ def test_dashboard_queries_filter_results_by_selected_date(tmp_path) -> None:
 
     assert daily_results == [selected_day_ok, selected_day_problem]
     assert recent_problems == [selected_day_problem]
+
+
+def test_cleanup_check_results_older_than_deletes_only_expired_raw_results(tmp_path) -> None:
+    connection = connect_database(tmp_path / "central.sqlite3")
+    initialize_database(connection)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    probe = create_probe(
+        connection,
+        probe_id="ru-dc-1",
+        name="Russia Datacenter",
+        region="Russia",
+        token_hash="test-token-hash",
+    )
+    expired_result = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 3, 20, 11, 59, 59, tzinfo=UTC),
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+        response_time_ms=100,
+    )
+    boundary_result = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 3, 20, 12, 0, 0, tzinfo=UTC),
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+        response_time_ms=110,
+    )
+    fresh_result = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 6, 18, 12, 0, 0, tzinfo=UTC),
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+        response_time_ms=120,
+    )
+
+    deleted_count = cleanup_check_results_older_than(
+        connection,
+        cutoff=datetime(2026, 3, 20, 12, 0, 0, tzinfo=UTC),
+    )
+    stored_results = list_check_results_for_site(connection, site_id=site.id)
+
+    assert deleted_count == 1
+    assert [result.id for result in stored_results] == [
+        boundary_result.id,
+        fresh_result.id,
+    ]
+    assert expired_result.id not in [result.id for result in stored_results]
+    assert get_probe(connection, "ru-dc-1") == probe
 
 
 def test_development_seed_is_idempotent_and_has_no_real_secrets(tmp_path) -> None:

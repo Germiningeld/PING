@@ -8,6 +8,7 @@ from central.app.auth import hash_probe_token
 from central.app.main import app
 from central.app.persistence import (
     connect_database,
+    create_check_result,
     create_probe,
     create_site,
     initialize_database,
@@ -156,6 +157,59 @@ def test_authenticated_probe_can_submit_batch_results(tmp_path) -> None:
     assert stored_results[1].status_group == "network_error"
     assert stored_results[1].error_type == "timeout"
     assert stored_results[1].error_message == "Request timed out"
+
+
+def test_results_submission_applies_retention_cleanup(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PING_RETENTION_DAYS", "90")
+    database_path = _build_database(tmp_path)
+    connection = connect_database(database_path)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    create_probe(
+        connection,
+        probe_id="eu-dc-1",
+        name="Europe Datacenter",
+        region="Europe",
+        token_hash=hash_probe_token("probe-secret"),
+    )
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id="eu-dc-1",
+        checked_at=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+        response_time_ms=123,
+    )
+    connection.close()
+    client = _build_client(database_path)
+
+    response = client.post(
+        "/api/probe/results",
+        headers=_auth_headers("eu-dc-1", "probe-secret"),
+        json={
+            "results": [
+                {
+                    "site_id": site.id,
+                    "checked_at": "2026-06-19T09:30:00+00:00",
+                    "result_status": "ok",
+                    "status_group": "2xx",
+                    "http_status": 200,
+                    "response_time_ms": 140,
+                }
+            ]
+        },
+    )
+
+    connection = connect_database(database_path)
+    stored_results = list_check_results_for_site(connection, site_id=site.id)
+    connection.close()
+
+    assert response.status_code == 200
+    assert response.json() == {"accepted": 1}
+    assert [result.checked_at for result in stored_results] == [
+        datetime(2026, 6, 19, 9, 30, tzinfo=UTC)
+    ]
 
 
 def test_results_submission_validates_payload(tmp_path) -> None:

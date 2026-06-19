@@ -7,6 +7,9 @@ PING - внутренний инструмент мониторинга дост
 - `central/` - центральное FastAPI-приложение. Сейчас содержит `/health`, SQLite persistence слой, authenticated probe API и admin dashboard shell.
 - `probe/` - lightweight probe agent MVP: синхронизация config с central API, HTTP `GET` проверки без редиректов, локальный cache и очередь результатов.
 - `tests/` - базовые тесты импортов, `/health`, persistence layer, probe API и probe agent.
+- `docker-compose.central.yml` - пример запуска central через Docker Compose.
+- `docker-compose.probe.yml` - пример запуска probe через Docker Compose.
+- `configs/probe-config.example.json` - пример локального config для probe без секретов.
 
 ## Локальная Разработка
 
@@ -59,6 +62,74 @@ http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/health
 ```
 
+## Docker Compose Запуск MVP
+
+Проект содержит отдельные примеры для central и probe. Они предназначены для воспроизводимого запуска MVP, но не настраивают реальный домен, HTTPS или production deployment.
+
+### Central
+
+Соберите и запустите central:
+
+```powershell
+docker compose -f docker-compose.central.yml up --build -d
+```
+
+Проверьте состояние контейнера и короткий хвост логов:
+
+```powershell
+docker compose -f docker-compose.central.yml ps
+docker compose -f docker-compose.central.yml logs --tail=100 central
+```
+
+Локальный URL:
+
+```text
+http://localhost:8000
+```
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+```
+
+### Probe
+
+Скопируйте `configs/probe-config.example.json` в локальный config, который не коммитится, и замените placeholder token на реальный token для выбранного probe:
+
+```powershell
+Copy-Item configs\probe-config.example.json probe-config.json
+```
+
+В `docker-compose.probe.yml` по умолчанию смонтирован example config. Для реального локального запуска замените mount на `./probe-config.json:/config/probe-config.json:ro`.
+
+Запуск:
+
+```powershell
+docker compose -f docker-compose.probe.yml up --build -d
+```
+
+Проверки:
+
+```powershell
+docker compose -f docker-compose.probe.yml ps
+docker compose -f docker-compose.probe.yml logs --tail=100 probe
+```
+
+Probe-контейнер запускает `ping-probe --once` в 60-секундном цикле и хранит cache/queue в persistent volume `probe-data`.
+
+### Важные Docker Команды
+
+Для постоянного dev-окружения используйте `up -d`, `ps`, `logs --tail=100`, `exec` и точечный `restart`.
+
+Не запускайте без явного решения:
+
+```text
+docker compose down
+docker compose down -v
+docker system prune
+```
+
 ### Admin Dashboard
 
 Dashboard доступен по адресу:
@@ -79,6 +150,7 @@ PING_ADMIN_USERNAME=admin
 PING_ADMIN_PASSWORD_HASH=<pbkdf2-password-hash>
 PING_ADMIN_SESSION_SECRET=<random-session-secret>
 PING_COOKIE_SECURE=false
+PING_RETENTION_DAYS=90
 ```
 
 Сгенерировать hash пароля можно через helper из проекта:
@@ -137,6 +209,59 @@ SQLite schema и базовые операции находятся в `central/
 - хранить `Site`, `Probe` и `CheckResult`;
 - создавать индексы для будущих dashboard-запросов по `site_id`, `probe_id`, `checked_at` и `site_id + checked_at`;
 - добавлять dev seed с примером сайта и трех datacenter probes без реальных секретов.
+- удалять raw check results старше retention cutoff через `cleanup_check_results_older_than`.
+
+Retention по умолчанию составляет 90 дней. Central API применяет cleanup после приема batch результатов от probe. Значение можно переопределить через `PING_RETENTION_DAYS`, но для MVP оно должно оставаться согласованным с PRD.
+
+## Переменные Окружения
+
+Required для central:
+
+```text
+PING_DATABASE_PATH=data/dev-check.sqlite3
+PING_ADMIN_USERNAME=admin
+PING_ADMIN_PASSWORD_HASH=<pbkdf2-password-hash>
+PING_ADMIN_SESSION_SECRET=<random-session-secret>
+PING_COOKIE_SECURE=false
+PING_RETENTION_DAYS=90
+```
+
+Optional:
+
+```text
+PING_ENV=development
+PING_HOST=0.0.0.0
+PING_PORT=8000
+```
+
+Required для probe config:
+
+```json
+{
+  "probe_id": "ru-dc-1",
+  "probe_token": "replace-with-probe-token",
+  "central_api_url": "http://localhost:8000",
+  "storage_dir": "data/probe"
+}
+```
+
+`probe_token` и `PING_ADMIN_SESSION_SECRET` являются секретами и не должны попадать в Git.
+
+## MVP Seed И Config
+
+В MVP список sites/probes можно подготовить через dev seed `seed_development_data` или через прямую инициализацию SQLite с функциями `create_site` и `create_probe` из `central.app.persistence`.
+
+Dev seed создает:
+
+- `https://example.com/`;
+- probes `ru-dc-1`, `eu-dc-1`, `us-dc-1`;
+- placeholder tokens вида `dev-token-<probe_id>`, которые хранятся в базе только как SHA-256 hash.
+
+Для ручной подготовки локальной базы:
+
+```powershell
+python -c "from central.app.persistence import connect_database, initialize_database, seed_development_data; c=connect_database('data/dev-check.sqlite3'); initialize_database(c); seed_development_data(c); c.close()"
+```
 
 ## Central Probe API
 

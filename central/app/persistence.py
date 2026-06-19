@@ -316,6 +316,19 @@ def list_recent_problem_results(
     return [_row_to_check_result(row) for row in rows]
 
 
+def cleanup_check_results_older_than(
+    connection: sqlite3.Connection,
+    *,
+    cutoff: datetime,
+) -> int:
+    cursor = connection.execute(
+        "DELETE FROM check_results WHERE checked_at < ?",
+        (_to_db_datetime(cutoff),),
+    )
+    connection.commit()
+    return cursor.rowcount
+
+
 def seed_development_data(connection: sqlite3.Connection) -> None:
     now = _to_db_datetime(utc_now())
     connection.execute(
