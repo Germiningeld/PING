@@ -387,6 +387,11 @@ def _render_dashboard_page(
     )
     selected_name = selected_site.name if selected_site is not None else "No active site"
     selected_url = selected_site.url if selected_site is not None else ""
+    auto_refresh_script = (
+        "window.setTimeout(() => window.location.reload(), 60_000);"
+        if period.selected_date == max_date
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -423,6 +428,9 @@ def _render_dashboard_page(
     .toolbar label {{ display: grid; gap: 4px; font-weight: 700; }}
     .toolbar input {{ padding: 8px; border: 1px solid #b8c2d6; border-radius: 6px; }}
     .toolbar button {{ padding: 9px 12px; border: 0; border-radius: 6px; background: #155eef; color: #fff; font-weight: 700; cursor: pointer; }}
+    .date-navigation {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    .date-nav-link {{ display: inline-block; padding: 8px 10px; border: 1px solid #b8c2d6; border-radius: 6px; background: #fff; font-weight: 700; }}
+    .date-nav-link.disabled {{ color: #98a2b3; background: #f2f4f7; cursor: not-allowed; }}
     .chart-panel {{ background: #fff; border: 1px solid #d8deea; border-radius: 8px; padding: 16px; margin: 12px 0 24px; }}
     .chart {{ width: 100%; height: auto; min-height: 280px; overflow: visible; }}
     .axis {{ stroke: #b8c2d6; stroke-width: 1; }}
@@ -474,6 +482,7 @@ def _render_dashboard_page(
     </section>
   </main>
   <script>
+    {auto_refresh_script}
     (() => {{
       const chart = document.querySelector("[data-response-chart]");
       if (!chart) return;
@@ -710,6 +719,41 @@ def _render_date_form(
         f'<option value="{value}"{" selected" if value == detail_limit else ""}>{value}</option>'
         for value in DETAIL_LIMITS
     )
+    navigation_parameters = {
+        "from_time": period.from_time.strftime("%H:%M"),
+        "to_time": period.to_time.strftime("%H:%M"),
+        "limit": detail_limit,
+    }
+    if selected_site is not None:
+        navigation_parameters["site_id"] = selected_site.id
+
+    def navigation_action(label: str, target_date: date, *, disabled: bool) -> str:
+        if disabled:
+            return (
+                f'<span class="date-nav-link disabled" aria-disabled="true">'
+                f"{escape(label)}</span>"
+            )
+        query = urlencode({**navigation_parameters, "date": target_date.isoformat()})
+        return (
+            f'<a class="date-nav-link" href="/dashboard?{escape(query, quote=True)}">'
+            f"{escape(label)}</a>"
+        )
+
+    previous_action = navigation_action(
+        "Previous day",
+        period.selected_date - timedelta(days=1),
+        disabled=period.selected_date <= min_date,
+    )
+    today_action = navigation_action(
+        "Today",
+        max_date,
+        disabled=period.selected_date == max_date,
+    )
+    next_action = navigation_action(
+        "Next day",
+        period.selected_date + timedelta(days=1),
+        disabled=period.selected_date >= max_date,
+    )
     return f"""
       {message_html}
       <form class="toolbar" method="get" action="/dashboard">
@@ -718,6 +762,11 @@ def _render_date_form(
           <input id="date" name="date" type="date" value="{period.selected_date.isoformat()}"
             min="{min_date.isoformat()}" max="{max_date.isoformat()}">
         </label>
+        <nav class="date-navigation" aria-label="Date navigation">
+          {previous_action}
+          {today_action}
+          {next_action}
+        </nav>
         <label for="from_time">From (MSK)
           <input id="from_time" name="from_time" type="time"
             value="{period.from_time.strftime('%H:%M')}" required>

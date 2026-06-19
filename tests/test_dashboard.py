@@ -227,6 +227,96 @@ def test_dashboard_can_show_selected_date_history(dashboard_client) -> None:
     assert 'data-status-group="network_error"' in dashboard_response.text
 
 
+def test_dashboard_date_navigation_preserves_url_and_chart_filter_state(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+    selected_date = today - timedelta(days=1)
+
+    response = dashboard_client.get(
+        "/dashboard",
+        params={
+            "site_id": 1,
+            "date": selected_date.isoformat(),
+            "from_time": "08:15",
+            "to_time": "17:45",
+            "limit": "100",
+        },
+    )
+
+    assert response.status_code == 200
+    for target_date, label in (
+        (selected_date - timedelta(days=1), "Previous day"),
+        (today, "Today"),
+        (selected_date + timedelta(days=1), "Next day"),
+    ):
+        expected_href = (
+            "/dashboard?from_time=08%3A15&amp;to_time=17%3A45&amp;limit=100"
+            f"&amp;site_id=1&amp;date={target_date.isoformat()}"
+        )
+        assert f'href="{expected_href}">{label}</a>' in response.text
+    assert "ping-dashboard-chart-filters-v1" in response.text
+
+
+def test_dashboard_date_navigation_disables_retention_and_future_boundaries(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+    retention_boundary = today - timedelta(days=89)
+
+    today_response = dashboard_client.get("/dashboard")
+    boundary_response = dashboard_client.get(
+        "/dashboard", params={"date": retention_boundary.isoformat()}
+    )
+
+    assert (
+        '<span class="date-nav-link disabled" aria-disabled="true">Today</span>'
+        in today_response.text
+    )
+    assert (
+        '<span class="date-nav-link disabled" aria-disabled="true">Next day</span>'
+        in today_response.text
+    )
+    assert (
+        '<span class="date-nav-link disabled" aria-disabled="true">Previous day</span>'
+        in boundary_response.text
+    )
+    assert f'min="{retention_boundary.isoformat()}" max="{today.isoformat()}"' in (
+        boundary_response.text
+    )
+
+
+def test_dashboard_auto_refreshes_only_today_without_sticky_header(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    yesterday = datetime.now(ZoneInfo("Europe/Moscow")).date() - timedelta(days=1)
+
+    today_response = dashboard_client.get("/dashboard")
+    historical_response = dashboard_client.get(
+        "/dashboard", params={"date": yesterday.isoformat()}
+    )
+
+    refresh_script = "window.setTimeout(() => window.location.reload(), 60_000);"
+    assert refresh_script in today_response.text
+    assert refresh_script not in historical_response.text
+    assert "position: sticky" not in today_response.text
+
+
 def test_dashboard_period_converts_full_msk_day_to_utc() -> None:
     period = _parse_dashboard_period(
         date_value="2026-06-19",
