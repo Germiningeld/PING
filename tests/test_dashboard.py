@@ -130,6 +130,33 @@ def test_admin_can_login_and_see_dashboard_shell(dashboard_client) -> None:
     assert "503" in dashboard_response.text
 
 
+def test_dashboard_status_badges_use_distinct_5xx_and_network_error_styles(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    dashboard_response = dashboard_client.get("/dashboard")
+
+    assert dashboard_response.status_code == 200
+    assert (
+        ".status-5xx { background: #ffccc7; color: #820014; }"
+        in dashboard_response.text
+    )
+    assert (
+        ".status-network_error { background: #5c0011; color: #fff1f0; }"
+        in dashboard_response.text
+    )
+    assert ".status-5xx, .status-network_error" not in dashboard_response.text
+    assert '<span class="status status-5xx">5xx</span>' in dashboard_response.text
+    assert (
+        '<span class="status status-network_error">network_error</span>'
+        in dashboard_response.text
+    )
+
+
 def test_dashboard_can_show_selected_date_history(dashboard_client) -> None:
     dashboard_client.post(
         "/login",

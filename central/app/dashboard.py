@@ -264,7 +264,8 @@ def _render_dashboard_page(
     .status-2xx {{ background: #d9f7be; color: #135200; }}
     .status-3xx {{ background: #ffe7ba; color: #ad4e00; }}
     .status-4xx {{ background: #ffd8bf; color: #ad2102; }}
-    .status-5xx, .status-network_error {{ background: #ffa39e; color: #820014; }}
+    .status-5xx {{ background: #ffccc7; color: #820014; }}
+    .status-network_error {{ background: #5c0011; color: #fff1f0; }}
     .status-probe_error {{ background: #efdbff; color: #391085; }}
     .status-unknown {{ background: #f0f0f0; color: #595959; }}
     .toolbar {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }}
