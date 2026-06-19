@@ -40,6 +40,8 @@ STATUS_GROUPS = ("2xx", "3xx", "4xx", "5xx", "network_error", "probe_error")
 MSK = ZoneInfo("Europe/Moscow")
 DEFAULT_FROM_TIME = time(0, 0)
 DEFAULT_TO_TIME = time(23, 59)
+PROBE_INTERVAL_SECONDS = 60
+STALE_AFTER = timedelta(minutes=3)
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,16 @@ class DashboardPeriod:
     start_at: datetime
     end_at: datetime
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class ProbePeriodSummary:
+    probe_id: str
+    average_response_time_ms: float | None
+    uptime_percent: float | None
+    received_checks: int
+    coverage_percent: float
+    status_counts: dict[str, int]
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -324,7 +336,13 @@ def _render_dashboard_page(
     max_date: date,
 ) -> str:
     sites_html = _render_sites(sites, selected_site, period)
-    statuses_html = _render_statuses(probes, latest_results)
+    statuses_html = _render_probe_period_summary(
+        probes,
+        latest_results,
+        period_results,
+        period=period,
+        now=datetime.now(UTC),
+    )
     date_form_html = _render_date_form(selected_site, period, min_date, max_date)
     chart_html = _render_response_time_chart(period_results, probes)
     details_html = _render_daily_details(period_results, probes)
@@ -360,6 +378,9 @@ def _render_dashboard_page(
     .status-network_error {{ background: #5c0011; color: #fff1f0; }}
     .status-probe_error {{ background: #efdbff; color: #391085; }}
     .status-unknown {{ background: #f0f0f0; color: #595959; }}
+    .stale {{ display: inline-block; padding: 4px 8px; border-radius: 999px; background: #fff1f0; color: #a8071a; font-weight: 700; }}
+    .table-scroll {{ overflow-x: auto; }}
+    .overall-uptime {{ margin-top: -18px; }}
     .toolbar {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }}
     .toolbar label {{ display: grid; gap: 4px; font-weight: 700; }}
     .toolbar input {{ padding: 8px; border: 1px solid #b8c2d6; border-radius: 6px; }}
@@ -402,7 +423,7 @@ def _render_dashboard_page(
     <section>
       <h1>{escape(selected_name)}</h1>
       <p class="muted">{escape(selected_url)}</p>
-      <h2>Current Probe Status</h2>
+      <h2>Probe Period Summary</h2>
       {statuses_html}
       <h2>Response Time History</h2>
       {date_form_html}
@@ -442,30 +463,105 @@ def _render_sites(
     return f"<ul>{''.join(items)}</ul>"
 
 
-def _render_statuses(
+def _summarize_probe_period(
+    probes: list[Probe],
+    results: list[CheckResult],
+    *,
+    period: DashboardPeriod,
+) -> tuple[list[ProbePeriodSummary], float | None]:
+    probe_ids = {probe.id for probe in probes}
+    grouped: dict[str, list[CheckResult]] = defaultdict(list)
+    for result in results:
+        if result.probe_id in probe_ids:
+            grouped[result.probe_id].append(result)
+
+    expected_checks = max(
+        (period.end_at - period.start_at).total_seconds() / PROBE_INTERVAL_SECONDS,
+        0,
+    )
+    summaries = []
+    total_received = 0
+    total_successful = 0
+    for probe in probes:
+        probe_results = grouped[probe.id]
+        received = len(probe_results)
+        successful = sum(result.status_group == "2xx" for result in probe_results)
+        response_times = [
+            result.response_time_ms
+            for result in probe_results
+            if result.response_time_ms is not None
+        ]
+        counts = {
+            status_group: sum(
+                result.status_group == status_group for result in probe_results
+            )
+            for status_group in STATUS_GROUPS
+        }
+        summaries.append(
+            ProbePeriodSummary(
+                probe_id=probe.id,
+                average_response_time_ms=(
+                    sum(response_times) / len(response_times) if response_times else None
+                ),
+                uptime_percent=(successful / received * 100 if received else None),
+                received_checks=received,
+                coverage_percent=(
+                    min(received / expected_checks * 100, 100)
+                    if expected_checks
+                    else 0
+                ),
+                status_counts=counts,
+            )
+        )
+        total_received += received
+        total_successful += successful
+
+    overall_uptime = (
+        total_successful / total_received * 100 if total_received else None
+    )
+    return summaries, overall_uptime
+
+
+def _render_probe_period_summary(
     probes: list[Probe],
     latest_results: dict[str, CheckResult],
+    period_results: list[CheckResult],
+    *,
+    period: DashboardPeriod,
+    now: datetime,
 ) -> str:
     if not probes:
         return '<p class="muted">No enabled probes configured.</p>'
 
+    summaries, overall_uptime = _summarize_probe_period(
+        probes, period_results, period=period
+    )
+    summaries_by_probe = {summary.probe_id: summary for summary in summaries}
     rows = []
     for probe in probes:
         result = latest_results.get(probe.id)
+        summary = summaries_by_probe[probe.id]
         if result is None:
             status_html = '<span class="status status-unknown">no data</span>'
             checked_at = "never"
             http_status = ""
-            response_time = ""
         else:
             status_html = _status_badge(result.status_group)
+            if now - result.checked_at > STALE_AFTER:
+                status_html += ' <span class="stale">stale</span>'
             checked_at = _format_datetime(result.checked_at)
             http_status = str(result.http_status or result.error_type or "")
-            response_time = (
-                f"{result.response_time_ms} ms"
-                if result.response_time_ms is not None
-                else ""
-            )
+
+        average_response = (
+            f"{summary.average_response_time_ms:.1f} ms"
+            if summary.average_response_time_ms is not None
+            else "—"
+        )
+        uptime = (
+            f"{summary.uptime_percent:.1f}%"
+            if summary.uptime_percent is not None
+            else "No data"
+        )
 
         rows.append(
             "<tr>"
@@ -473,15 +569,31 @@ def _render_statuses(
             f"<td>{escape(probe.region)}</td>"
             f"<td>{status_html}</td>"
             f"<td>{escape(http_status)}</td>"
-            f"<td>{escape(response_time)}</td>"
             f"<td>{escape(checked_at)}</td>"
-            "</tr>"
+            f"<td>{escape(average_response)}</td>"
+            f"<td>{escape(uptime)}</td>"
+            f"<td>{summary.received_checks}</td>"
+            f"<td>{summary.coverage_percent:.1f}%</td>"
+            + "".join(
+                f"<td>{summary.status_counts[status_group]}</td>"
+                for status_group in STATUS_GROUPS
+            )
+            + "</tr>"
         )
 
+    overall = (
+        f"Overall uptime across received checks: {overall_uptime:.1f}%"
+        if overall_uptime is not None
+        else "Overall uptime: no data for the selected period."
+    )
+    status_headers = "".join(f"<th>{status_group}</th>" for status_group in STATUS_GROUPS)
     return (
-        "<table><thead><tr><th>Probe</th><th>Region</th><th>Status</th>"
-        "<th>HTTP/Error</th><th>Response Time</th><th>Checked At</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
+        '<div class="table-scroll"><table><thead><tr><th>Probe</th><th>Region</th>'
+        "<th>Last Status</th><th>Last HTTP/Error</th><th>Last Checked At</th>"
+        "<th>Average Response Time</th><th>Uptime</th><th>Received</th>"
+        f"<th>Coverage</th>{status_headers}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+        f'<p class="muted overall-uptime">{escape(overall)}</p>'
     )
 
 

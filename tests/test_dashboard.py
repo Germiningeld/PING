@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
 from central.app.auth import ADMIN_SESSION_COOKIE, hash_admin_password
-from central.app.dashboard import _parse_dashboard_period
+from central.app.dashboard import (
+    DashboardPeriod,
+    _parse_dashboard_period,
+    _render_probe_period_summary,
+    _summarize_probe_period,
+)
 from central.app.main import app
+from central.app.models import CheckResult, Probe
 from central.app.persistence import (
     connect_database,
     create_check_result,
@@ -17,6 +23,44 @@ from central.app.persistence import (
     initialize_database,
 )
 from central.app.probe_api import get_database_connection
+
+
+def _probe(probe_id: str) -> Probe:
+    created_at = datetime(2026, 6, 19, tzinfo=UTC)
+    return Probe(
+        id=probe_id,
+        name=f"Probe {probe_id}",
+        region="Test",
+        probe_type="datacenter",
+        network_label="Test network",
+        enabled=True,
+        token_hash="hash",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _result(
+    result_id: int,
+    *,
+    probe_id: str,
+    checked_at: datetime,
+    status_group: str,
+    response_time_ms: int | None = None,
+) -> CheckResult:
+    return CheckResult(
+        id=result_id,
+        site_id=1,
+        probe_id=probe_id,
+        checked_at=checked_at,
+        result_status="ok" if status_group == "2xx" else status_group,
+        status_group=status_group,
+        http_status=200 if status_group == "2xx" else None,
+        response_time_ms=response_time_ms,
+        error_type=status_group if "error" in status_group else None,
+        error_message=None,
+        created_at=checked_at,
+    )
 
 
 @pytest.fixture
@@ -266,6 +310,116 @@ def test_dashboard_period_filters_graph_details_and_problems(dashboard_client) -
     assert "No check results for the selected period." in response.text
     assert "No recent problems for the selected site." in response.text
     assert f"date={selected_date}&amp;from_time=00%3A00&amp;to_time=00%3A00" in response.text
+
+
+def test_probe_period_summary_calculates_metrics_and_caps_coverage() -> None:
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    period = DashboardPeriod(
+        selected_date=start_at.date(),
+        from_time=start_at.time(),
+        to_time=(start_at + timedelta(minutes=4)).time(),
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=5),
+    )
+    status_groups = ("2xx", "3xx", "4xx", "5xx", "network_error", "probe_error")
+    response_times = (100, 200, 300, 500, None, None)
+    results = [
+        _result(
+            index,
+            probe_id="probe-a",
+            checked_at=start_at + timedelta(seconds=index),
+            status_group=status_group,
+            response_time_ms=response_time,
+        )
+        for index, (status_group, response_time) in enumerate(
+            zip(status_groups, response_times), start=1
+        )
+    ]
+
+    summaries, overall_uptime = _summarize_probe_period(
+        [_probe("probe-a")], results, period=period
+    )
+
+    summary = summaries[0]
+    assert summary.average_response_time_ms == pytest.approx(275)
+    assert summary.uptime_percent == pytest.approx(100 / 6)
+    assert summary.received_checks == 6
+    assert summary.coverage_percent == 100
+    assert summary.status_counts == {status_group: 1 for status_group in status_groups}
+    assert overall_uptime == pytest.approx(100 / 6)
+
+
+def test_probe_period_summary_handles_empty_period_and_errors_without_response_time() -> None:
+    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
+    period = DashboardPeriod(
+        selected_date=start_at.date(),
+        from_time=start_at.time(),
+        to_time=(start_at + timedelta(minutes=9)).time(),
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=10),
+    )
+    results = [
+        _result(
+            1,
+            probe_id="probe-errors",
+            checked_at=start_at,
+            status_group="network_error",
+        ),
+        _result(
+            2,
+            probe_id="probe-errors",
+            checked_at=start_at + timedelta(minutes=1),
+            status_group="probe_error",
+        ),
+    ]
+
+    summaries, overall_uptime = _summarize_probe_period(
+        [_probe("probe-empty"), _probe("probe-errors")], results, period=period
+    )
+
+    empty, errors = summaries
+    assert empty.received_checks == 0
+    assert empty.average_response_time_ms is None
+    assert empty.uptime_percent is None
+    assert empty.coverage_percent == 0
+    assert errors.received_checks == 2
+    assert errors.average_response_time_ms is None
+    assert errors.uptime_percent == 0
+    assert errors.coverage_percent == 20
+    assert overall_uptime == 0
+
+
+def test_probe_stale_threshold_is_strictly_older_than_three_minutes() -> None:
+    now = datetime(2026, 6, 19, 12, 0, tzinfo=UTC)
+    period = DashboardPeriod(
+        selected_date=now.date(),
+        from_time=time(11, 0),
+        to_time=time(11, 59),
+        start_at=now - timedelta(hours=1),
+        end_at=now,
+    )
+    probes = [_probe("fresh"), _probe("stale")]
+    latest_results = {
+        "fresh": _result(
+            1,
+            probe_id="fresh",
+            checked_at=now - timedelta(minutes=3),
+            status_group="2xx",
+        ),
+        "stale": _result(
+            2,
+            probe_id="stale",
+            checked_at=now - timedelta(minutes=3, microseconds=1),
+            status_group="2xx",
+        ),
+    }
+
+    html = _render_probe_period_summary(
+        probes, latest_results, [], period=period, now=now
+    )
+
+    assert html.count('<span class="stale">stale</span>') == 1
+    assert "Overall uptime: no data for the selected period." in html
 
 
 def test_admin_can_logout(dashboard_client) -> None:
