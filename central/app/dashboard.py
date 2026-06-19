@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from collections import defaultdict
+from datetime import UTC, date, datetime, timedelta
 from html import escape
 from typing import Annotated
 from urllib.parse import parse_qs
@@ -22,6 +23,7 @@ from central.app.models import CheckResult, Probe, Site
 from central.app.persistence import (
     get_site,
     list_active_sites,
+    list_check_results_for_site_on_date,
     list_enabled_probes,
     list_latest_results_for_site_by_probe,
     list_recent_problem_results,
@@ -31,6 +33,8 @@ from central.app.probe_api import DatabaseConnection
 
 
 router = APIRouter(tags=["dashboard"])
+RETENTION_DAYS = 90
+STATUS_GROUPS = ("2xx", "3xx", "4xx", "5xx", "network_error", "probe_error")
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -94,6 +98,7 @@ def dashboard(
     request: Request,
     connection: DatabaseConnection,
     site_id: Annotated[int | None, Query(gt=0)] = None,
+    selected_date: Annotated[date | None, Query(alias="date")] = None,
 ) -> Response:
     username = _current_admin_username(request)
     if username is None:
@@ -103,13 +108,29 @@ def dashboard(
     sites = list_active_sites(connection)
     selected_site = _select_site(connection, sites=sites, site_id=site_id)
     probes = list_enabled_probes(connection)
+    today = datetime.now(UTC).date()
+    min_date = today - timedelta(days=RETENTION_DAYS - 1)
+    chart_date = _bounded_date(selected_date or today, min_date=min_date, max_date=today)
     latest_results = (
         list_latest_results_for_site_by_probe(connection, site_id=selected_site.id)
         if selected_site is not None
         else {}
     )
+    daily_results = (
+        list_check_results_for_site_on_date(
+            connection,
+            site_id=selected_site.id,
+            selected_date=chart_date,
+        )
+        if selected_site is not None
+        else []
+    )
     recent_problems = (
-        list_recent_problem_results(connection, site_id=selected_site.id)
+        list_recent_problem_results(
+            connection,
+            site_id=selected_site.id,
+            selected_date=chart_date,
+        )
         if selected_site is not None
         else []
     )
@@ -121,7 +142,11 @@ def dashboard(
             selected_site=selected_site,
             probes=probes,
             latest_results=latest_results,
+            daily_results=daily_results,
             recent_problems=recent_problems,
+            selected_date=chart_date,
+            min_date=min_date,
+            max_date=today,
         )
     )
 
@@ -154,6 +179,10 @@ def _select_site(
         if site is not None and site.enabled:
             return site
     return sites[0] if sites else None
+
+
+def _bounded_date(value: date, *, min_date: date, max_date: date) -> date:
+    return min(max(value, min_date), max_date)
 
 
 def _render_login_page(*, error: str | None = None) -> str:
@@ -196,10 +225,17 @@ def _render_dashboard_page(
     selected_site: Site | None,
     probes: list[Probe],
     latest_results: dict[str, CheckResult],
+    daily_results: list[CheckResult],
     recent_problems: list[CheckResult],
+    selected_date: date,
+    min_date: date,
+    max_date: date,
 ) -> str:
     sites_html = _render_sites(sites, selected_site)
     statuses_html = _render_statuses(probes, latest_results)
+    date_form_html = _render_date_form(selected_site, selected_date, min_date, max_date)
+    chart_html = _render_response_time_chart(daily_results, probes)
+    details_html = _render_daily_details(daily_results, probes)
     problems_html = _render_recent_problems(recent_problems, probes)
     selected_name = selected_site.name if selected_site is not None else "No active site"
     selected_url = selected_site.url if selected_site is not None else ""
@@ -231,6 +267,30 @@ def _render_dashboard_page(
     .status-5xx, .status-network_error {{ background: #ffa39e; color: #820014; }}
     .status-probe_error {{ background: #efdbff; color: #391085; }}
     .status-unknown {{ background: #f0f0f0; color: #595959; }}
+    .toolbar {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }}
+    .toolbar label {{ display: grid; gap: 4px; font-weight: 700; }}
+    .toolbar input {{ padding: 8px; border: 1px solid #b8c2d6; border-radius: 6px; }}
+    .toolbar button {{ padding: 9px 12px; border: 0; border-radius: 6px; background: #155eef; color: #fff; font-weight: 700; cursor: pointer; }}
+    .chart-panel {{ background: #fff; border: 1px solid #d8deea; border-radius: 8px; padding: 16px; margin: 12px 0 24px; }}
+    .chart {{ width: 100%; height: auto; min-height: 280px; overflow: visible; }}
+    .axis {{ stroke: #b8c2d6; stroke-width: 1; }}
+    .grid {{ stroke: #e6eaf2; stroke-width: 1; }}
+    .series {{ fill: none; stroke-width: 2.5; }}
+    .point {{ stroke: #fff; stroke-width: 1.5; }}
+    .legend {{ display: flex; flex-wrap: wrap; gap: 10px 16px; margin: 12px 0; }}
+    .legend-item {{ display: inline-flex; gap: 6px; align-items: center; }}
+    .swatch {{ width: 12px; height: 12px; border-radius: 999px; display: inline-block; }}
+    .probe-ru-dc-1, .swatch-ru-dc-1 {{ stroke: #155eef; background: #155eef; }}
+    .probe-eu-dc-1, .swatch-eu-dc-1 {{ stroke: #13a8a8; background: #13a8a8; }}
+    .probe-us-dc-1, .swatch-us-dc-1 {{ stroke: #722ed1; background: #722ed1; }}
+    .probe-default, .swatch-default {{ stroke: #475467; background: #475467; }}
+    .point.status-point-2xx {{ fill: #52c41a; }}
+    .point.status-point-3xx {{ fill: #fa8c16; }}
+    .point.status-point-4xx {{ fill: #f5222d; }}
+    .point.status-point-5xx {{ fill: #a8071a; }}
+    .point.status-point-network_error {{ fill: #5c0011; }}
+    .point.status-point-probe_error {{ fill: #722ed1; }}
+    .status-key {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
     .muted {{ color: #667085; }}
     .logout {{ background: none; border: 1px solid #b8c2d6; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
   </style>
@@ -250,6 +310,11 @@ def _render_dashboard_page(
       <p class="muted">{escape(selected_url)}</p>
       <h2>Current Probe Status</h2>
       {statuses_html}
+      <h2>Response Time History</h2>
+      {date_form_html}
+      {chart_html}
+      <h2>Check Details</h2>
+      {details_html}
       <h2>Recent Problems</h2>
       {problems_html}
     </section>
@@ -316,6 +381,170 @@ def _render_statuses(
     )
 
 
+def _render_date_form(
+    selected_site: Site | None,
+    selected_date: date,
+    min_date: date,
+    max_date: date,
+) -> str:
+    site_input = (
+        f'<input type="hidden" name="site_id" value="{selected_site.id}">'
+        if selected_site is not None
+        else ""
+    )
+    return f"""
+      <form class="toolbar" method="get" action="/dashboard">
+        {site_input}
+        <label for="date">Date
+          <input id="date" name="date" type="date" value="{selected_date.isoformat()}"
+            min="{min_date.isoformat()}" max="{max_date.isoformat()}">
+        </label>
+        <button type="submit">Show</button>
+      </form>
+      <div class="status-key">
+        {_status_badge("2xx")}
+        {_status_badge("3xx")}
+        {_status_badge("4xx")}
+        {_status_badge("5xx")}
+        {_status_badge("network_error")}
+        {_status_badge("probe_error")}
+      </div>
+    """
+
+
+def _render_response_time_chart(
+    daily_results: list[CheckResult],
+    probes: list[Probe],
+) -> str:
+    chartable_results = [
+        result for result in daily_results if result.response_time_ms is not None
+    ]
+    if not chartable_results:
+        return '<p class="muted">No response time data for the selected date.</p>'
+
+    width = 900
+    height = 320
+    left = 56
+    right = 24
+    top = 20
+    bottom = 42
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    max_response_time = max(result.response_time_ms or 0 for result in chartable_results)
+    max_response_time = max(max_response_time, 100)
+    probe_names = {probe.id: probe.name for probe in probes}
+    grouped: dict[str, list[CheckResult]] = defaultdict(list)
+    for result in chartable_results:
+        grouped[result.probe_id].append(result)
+
+    def x_position(value: datetime) -> float:
+        seconds = (
+            value.astimezone(UTC).hour * 3600
+            + value.astimezone(UTC).minute * 60
+            + value.astimezone(UTC).second
+        )
+        return left + (seconds / 86399) * plot_width
+
+    def y_position(response_time_ms: int) -> float:
+        return top + plot_height - (response_time_ms / max_response_time) * plot_height
+
+    grid_lines = []
+    for hour in (0, 6, 12, 18, 24):
+        x = left + (hour / 24) * plot_width
+        label = f"{hour:02d}:00" if hour < 24 else "24:00"
+        grid_lines.append(
+            f'<line class="grid" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_height}"></line>'
+            f'<text x="{x:.1f}" y="{height - 12}" text-anchor="middle" fill="#667085" font-size="12">{label}</text>'
+        )
+
+    y_labels = []
+    for ratio in (0, 0.5, 1):
+        y = top + plot_height - ratio * plot_height
+        value = round(max_response_time * ratio)
+        y_labels.append(
+            f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" y2="{y:.1f}"></line>'
+            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" fill="#667085" font-size="12">{value} ms</text>'
+        )
+
+    series_html = []
+    legend_items = []
+    for probe_id, results in grouped.items():
+        css_probe = _probe_css_class(probe_id)
+        sorted_results = sorted(results, key=lambda result: result.checked_at)
+        points = " ".join(
+            f"{x_position(result.checked_at):.1f},{y_position(result.response_time_ms or 0):.1f}"
+            for result in sorted_results
+        )
+        circles = []
+        for result in sorted_results:
+            title = (
+                f"{probe_names.get(result.probe_id, result.probe_id)} "
+                f"{_format_datetime(result.checked_at)} "
+                f"{result.response_time_ms} ms "
+                f"{result.status_group} "
+                f"{result.http_status or result.error_type or ''}"
+            )
+            circles.append(
+                f'<circle class="point status-point-{_safe_status_css(result.status_group)}" '
+                f'cx="{x_position(result.checked_at):.1f}" '
+                f'cy="{y_position(result.response_time_ms or 0):.1f}" r="4">'
+                f"<title>{escape(title)}</title></circle>"
+            )
+        series_html.append(
+            f'<polyline class="series {css_probe}" points="{points}"></polyline>'
+            f"{''.join(circles)}"
+        )
+        legend_items.append(
+            f'<span class="legend-item"><span class="swatch swatch-{escape(css_probe.removeprefix("probe-"))}"></span>'
+            f"{escape(probe_names.get(probe_id, probe_id))}</span>"
+        )
+
+    return (
+        '<div class="chart-panel">'
+        f'<div class="legend">{"".join(legend_items)}</div>'
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        'aria-label="Response time by probe for selected date">'
+        f'{"".join(grid_lines)}{"".join(y_labels)}'
+        f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"></line>'
+        f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"></line>'
+        f'{"".join(series_html)}'
+        "</svg></div>"
+    )
+
+
+def _render_daily_details(
+    daily_results: list[CheckResult],
+    probes: list[Probe],
+) -> str:
+    if not daily_results:
+        return '<p class="muted">No check results for the selected date.</p>'
+
+    probe_names = {probe.id: probe.name for probe in probes}
+    rows = []
+    for result in daily_results:
+        detail = str(result.http_status or result.error_type or result.result_status)
+        response_time = (
+            f"{result.response_time_ms} ms"
+            if result.response_time_ms is not None
+            else ""
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{escape(_format_datetime(result.checked_at))}</td>"
+            f"<td>{escape(probe_names.get(result.probe_id, result.probe_id))}</td>"
+            f"<td>{_status_badge(result.status_group)}</td>"
+            f"<td>{escape(detail)}</td>"
+            f"<td>{escape(response_time)}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<table><thead><tr><th>Timestamp</th><th>Probe</th><th>Status</th>"
+        "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def _render_recent_problems(
     recent_problems: list[CheckResult],
     probes: list[Probe],
@@ -350,18 +579,24 @@ def _render_recent_problems(
 
 
 def _status_badge(status_group: str) -> str:
-    css_status = status_group if status_group in {
-        "2xx",
-        "3xx",
-        "4xx",
-        "5xx",
-        "network_error",
-        "probe_error",
-    } else "unknown"
+    css_status = _safe_status_css(status_group)
     return (
         f'<span class="status status-{escape(css_status)}">'
         f"{escape(status_group)}</span>"
     )
+
+
+def _safe_status_css(status_group: str) -> str:
+    return status_group if status_group in STATUS_GROUPS else "unknown"
+
+
+def _probe_css_class(probe_id: str) -> str:
+    known_probe_classes = {
+        "ru-dc-1": "probe-ru-dc-1",
+        "eu-dc-1": "probe-eu-dc-1",
+        "us-dc-1": "probe-us-dc-1",
+    }
+    return known_probe_classes.get(probe_id, "probe-default")
 
 
 def _format_datetime(value: datetime) -> str:

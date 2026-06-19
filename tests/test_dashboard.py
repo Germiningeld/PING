@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +23,7 @@ def dashboard_client(tmp_path, monkeypatch):
     connection = connect_database(database_path)
     initialize_database(connection)
     site = create_site(connection, name="Example", url="https://example.com/")
+    selected_date = datetime.now(UTC).date()
     create_probe(
         connection,
         probe_id="ru-dc-1",
@@ -30,15 +31,48 @@ def dashboard_client(tmp_path, monkeypatch):
         region="Russia",
         token_hash="probe-token-hash",
     )
+    create_probe(
+        connection,
+        probe_id="eu-dc-1",
+        name="Europe Datacenter",
+        region="Europe",
+        token_hash="probe-token-hash",
+    )
     create_check_result(
         connection,
         site_id=site.id,
         probe_id="ru-dc-1",
-        checked_at=datetime(2026, 6, 19, 10, 0, tzinfo=UTC),
+        checked_at=datetime.combine(selected_date, datetime.min.time(), tzinfo=UTC)
+        + timedelta(hours=10),
         result_status="ok",
         status_group="2xx",
         http_status=200,
         response_time_ms=123,
+    )
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id="eu-dc-1",
+        checked_at=datetime.combine(selected_date, datetime.min.time(), tzinfo=UTC)
+        + timedelta(hours=10, minutes=1),
+        result_status="server_error",
+        status_group="5xx",
+        http_status=503,
+        response_time_ms=820,
+    )
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id="eu-dc-1",
+        checked_at=datetime.combine(
+            selected_date - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        + timedelta(hours=10, minutes=1),
+        result_status="network_error",
+        status_group="network_error",
+        error_type="timeout",
     )
     connection.close()
 
@@ -89,6 +123,27 @@ def test_admin_can_login_and_see_dashboard_shell(dashboard_client) -> None:
     assert "Russia Datacenter" in dashboard_response.text
     assert "2xx" in dashboard_response.text
     assert "200" in dashboard_response.text
+    assert "Response Time History" in dashboard_response.text
+    assert "aria-label=\"Response time by probe for selected date\"" in dashboard_response.text
+    assert "probe-ru-dc-1" in dashboard_response.text
+    assert "probe-eu-dc-1" in dashboard_response.text
+    assert "503" in dashboard_response.text
+
+
+def test_dashboard_can_show_selected_date_history(dashboard_client) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    selected_date = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    dashboard_response = dashboard_client.get(f"/dashboard?date={selected_date}")
+
+    assert dashboard_response.status_code == 200
+    assert f'value="{selected_date}"' in dashboard_response.text
+    assert "network_error" in dashboard_response.text
+    assert "timeout" in dashboard_response.text
+    assert "No response time data for the selected date." in dashboard_response.text
 
 
 def test_admin_can_logout(dashboard_client) -> None:

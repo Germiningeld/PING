@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from central.app.auth import hash_probe_token
@@ -233,6 +233,28 @@ def list_check_results_for_site(
     return [_row_to_check_result(row) for row in rows]
 
 
+def list_check_results_for_site_on_date(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    selected_date: date,
+) -> list[CheckResult]:
+    start_at = datetime.combine(selected_date, time.min, tzinfo=UTC)
+    end_at = datetime.combine(selected_date, time.max, tzinfo=UTC)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM check_results
+        WHERE site_id = ?
+            AND checked_at >= ?
+            AND checked_at <= ?
+        ORDER BY checked_at, probe_id, id
+        """,
+        (site_id, _to_db_datetime(start_at), _to_db_datetime(end_at)),
+    ).fetchall()
+    return [_row_to_check_result(row) for row in rows]
+
+
 def list_latest_results_for_site_by_probe(
     connection: sqlite3.Connection,
     *,
@@ -267,18 +289,29 @@ def list_recent_problem_results(
     connection: sqlite3.Connection,
     *,
     site_id: int,
+    selected_date: date | None = None,
     limit: int = 10,
 ) -> list[CheckResult]:
+    date_filter = ""
+    parameters: list[object] = [site_id]
+    if selected_date is not None:
+        start_at = datetime.combine(selected_date, time.min, tzinfo=UTC)
+        end_at = datetime.combine(selected_date, time.max, tzinfo=UTC)
+        date_filter = "AND checked_at >= ? AND checked_at <= ?"
+        parameters.extend([_to_db_datetime(start_at), _to_db_datetime(end_at)])
+    parameters.append(limit)
+
     rows = connection.execute(
-        """
+        f"""
         SELECT *
         FROM check_results
         WHERE site_id = ?
             AND status_group != '2xx'
+            {date_filter}
         ORDER BY checked_at DESC, id DESC
         LIMIT ?
         """,
-        (site_id, limit),
+        parameters,
     ).fetchall()
     return [_row_to_check_result(row) for row in rows]
 

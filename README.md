@@ -68,6 +68,9 @@ http://localhost:8000/dashboard
 ```
 
 Неавторизованный пользователь будет перенаправлен на `/login`.
+После входа dashboard показывает список sites, текущий статус по probes,
+график response time за выбранную дату в пределах 90-дневного retention,
+детали HTTP status/error type и recent problems.
 
 Для локального запуска задайте admin credentials и session secret через environment variables или локальный `.env` файл на основе `.env.example`:
 

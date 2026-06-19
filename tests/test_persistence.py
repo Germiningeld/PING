@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from central.app.persistence import (
     get_probe,
@@ -8,7 +8,9 @@ from central.app.persistence import (
     create_site,
     initialize_database,
     list_active_sites,
+    list_check_results_for_site_on_date,
     list_check_results_for_site,
+    list_recent_problem_results,
     seed_development_data,
 )
 
@@ -108,6 +110,62 @@ def test_persistence_flow_stores_network_error(tmp_path) -> None:
     assert result.http_status is None
     assert result.response_time_ms is None
     assert result.error_type == "timeout"
+
+
+def test_dashboard_queries_filter_results_by_selected_date(tmp_path) -> None:
+    connection = connect_database(tmp_path / "central.sqlite3")
+    initialize_database(connection)
+    site = create_site(connection, name="Example", url="https://example.com/")
+    probe = create_probe(
+        connection,
+        probe_id="ru-dc-1",
+        name="Russia Datacenter",
+        region="Russia",
+        token_hash="test-token-hash",
+    )
+    selected_day_ok = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 6, 19, 10, 0, tzinfo=UTC),
+        result_status="ok",
+        status_group="2xx",
+        http_status=200,
+        response_time_ms=120,
+    )
+    selected_day_problem = create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 6, 19, 10, 1, tzinfo=UTC),
+        result_status="server_error",
+        status_group="5xx",
+        http_status=500,
+        response_time_ms=600,
+    )
+    create_check_result(
+        connection,
+        site_id=site.id,
+        probe_id=probe.id,
+        checked_at=datetime(2026, 6, 18, 10, 1, tzinfo=UTC),
+        result_status="network_error",
+        status_group="network_error",
+        error_type="timeout",
+    )
+
+    daily_results = list_check_results_for_site_on_date(
+        connection,
+        site_id=site.id,
+        selected_date=date(2026, 6, 19),
+    )
+    recent_problems = list_recent_problem_results(
+        connection,
+        site_id=site.id,
+        selected_date=date(2026, 6, 19),
+    )
+
+    assert daily_results == [selected_day_ok, selected_day_problem]
+    assert recent_problems == [selected_day_problem]
 
 
 def test_development_seed_is_idempotent_and_has_no_real_secrets(tmp_path) -> None:
