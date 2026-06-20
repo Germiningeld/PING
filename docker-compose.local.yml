@@ -7,14 +7,14 @@ services:
       PING_ENV: development
       PING_AUTH_DISABLED: "true"
       PING_COOKIE_SECURE: "false"
-      PING_DATABASE_PATH: /app/data/ping.sqlite3
+      PING_DATABASE_PATH: /app/data/dev-check.sqlite3
     ports:
       - "8000:8000"
     volumes:
       - ./central:/app/central
       - ./probe:/app/probe
       - ./tests:/app/tests
-      - local-central-data:/app/data
+      - ./data:/app/data
     command:
       - uvicorn
       - central.app.main:app
@@ -25,6 +25,3 @@ services:
       - --reload
       - --reload-dir
       - /app/central
-
-volumes:
-  local-central-data:

@@ -39,7 +39,7 @@ PING - внутренний инструмент мониторинга дост
 
 ### Local-only Central Без Авторизации
 
-Для быстрой UI-разработки используйте отдельный Compose-файл. Он не подключает `.env`, не требует admin credentials или session secret и сохраняет локальную SQLite-базу в Docker volume:
+Для быстрой UI-разработки используйте отдельный Compose-файл. Он не подключает `.env`, не требует admin credentials или session secret и использует локальную SQLite-базу `data/dev-check.sqlite3` через bind mount:
 
 ```powershell
 docker compose -f docker-compose.local.yml up --build -d
