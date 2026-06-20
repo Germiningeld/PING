@@ -220,6 +220,30 @@ def test_admin_can_login_and_see_dashboard_shell(dashboard_client) -> None:
     assert "503" in dashboard_response.text
 
 
+def test_dashboard_renders_compact_localized_summary_without_site_report_header(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+
+    response = dashboard_client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "<h1>Example</h1>" not in response.text
+    assert '<p class="muted">https://example.com</p>' not in response.text
+    assert "Сводка по probes" in response.text
+    assert "Последняя проверка" in response.text
+    assert "Среднее время" in response.text
+    assert "Получено" in response.text
+    assert "Покрытие" in response.text
+    assert "Last Status" not in response.text
+    assert "Last HTTP/Error" not in response.text
+    assert '<div class="status-key">' not in response.text
+
+
 def test_dashboard_status_badges_use_distinct_5xx_and_network_error_styles(
     dashboard_client,
 ) -> None:
@@ -470,6 +494,40 @@ def test_dashboard_detail_limit_uses_allowlist_and_is_preserved_in_navigation(
     assert _parse_detail_limit(None) == DEFAULT_DETAIL_LIMIT
 
 
+def test_dashboard_detail_limit_form_is_next_to_details_and_preserves_period_state(
+    dashboard_client,
+) -> None:
+    dashboard_client.post(
+        "/login",
+        data={"username": "admin", "password": "correct-password"},
+        follow_redirects=False,
+    )
+    selected_date = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+
+    response = dashboard_client.get(
+        "/dashboard",
+        params={
+            "site_id": 1,
+            "date": selected_date,
+            "from_time": "08:15",
+            "to_time": "17:45",
+            "limit": "100",
+        },
+    )
+
+    details_heading = response.text.index("<h2>Check Details</h2>")
+    details_form = response.text.index(
+        '<form class="toolbar details-toolbar"', details_heading
+    )
+    details_table = response.text.index("<table>", details_form)
+    assert details_heading < details_form < details_table
+    assert '<input type="hidden" name="site_id" value="1">' in response.text
+    assert f'<input type="hidden" name="date" value="{selected_date}">' in response.text
+    assert '<input type="hidden" name="from_time" value="08:15">' in response.text
+    assert '<input type="hidden" name="to_time" value="17:45">' in response.text
+    assert '<option value="100" selected>100</option>' in response.text
+
+
 def test_dashboard_problems_heading_and_total_count(dashboard_client) -> None:
     dashboard_client.post(
         "/login",
@@ -591,7 +649,7 @@ def test_probe_stale_threshold_is_strictly_older_than_three_minutes() -> None:
     )
 
     assert html.count('<span class="stale">stale</span>') == 1
-    assert "Overall uptime: no data for the selected period." in html
+    assert "Общий uptime: нет данных за выбранный период." in html
 
 
 def test_probe_chart_colors_are_unique_stable_and_not_tied_to_demo_ids() -> None:
@@ -640,6 +698,11 @@ def test_response_chart_renders_filters_problem_markers_and_error_strip() -> Non
     assert 'class="problem-marker status-point-5xx"' in html
     assert 'class="problem-marker status-point-network_error"' in html
     assert 'class="point-hit"' in html
+    assert 'tabindex="0" aria-label="' in html
+    assert 'style="--probe-color:' in html
+    assert '<div class="chart-layout"><div class="legend"' in html
+    assert '<input type="checkbox"' not in html
+    assert 'data-status-toggle="2xx" aria-pressed="true"' in html
     assert html.count('class="series-segment"') == 1
 
 
@@ -700,7 +763,9 @@ def test_response_chart_filters_persist_for_future_page_refreshes(
     )
     response = dashboard_client.get("/dashboard")
 
-    assert 'data-status-toggle="2xx" checked' in response.text
+    assert 'data-status-toggle="2xx" aria-pressed="true"' in response.text
+    assert "statusButtons.forEach" in response.text
+    assert 'button.setAttribute("aria-pressed"' in response.text
     assert "ping-dashboard-chart-filters-v1" in response.text
     assert "localStorage.setItem(storageKey" in response.text
     assert 'item.setAttribute("hidden", "")' in response.text

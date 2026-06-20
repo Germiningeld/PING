@@ -390,13 +390,14 @@ def _render_dashboard_page(
     date_form_html = _render_date_form(
         selected_site, period, min_date, max_date, detail_limit
     )
+    detail_limit_form_html = _render_detail_limit_form(
+        selected_site, period, detail_limit
+    )
     chart_html = _render_response_time_chart(period_results, probes)
     details_html = _render_daily_details(detail_results, probes)
     problems_html = _render_recent_problems(
         recent_problems, probes, total_count=problem_count
     )
-    selected_name = selected_site.name if selected_site is not None else "No active site"
-    selected_url = selected_site.url if selected_site is not None else ""
     auto_refresh_script = (
         "window.setTimeout(() => window.location.reload(), 60_000);"
         if period.selected_date == max_date
@@ -414,14 +415,15 @@ def _render_dashboard_page(
     header {{ display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: #fff; border-bottom: 1px solid #d8deea; }}
     main {{ display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 66px); }}
     aside {{ padding: 20px; border-right: 1px solid #d8deea; background: #fff; }}
-    section {{ padding: 24px; }}
+    section {{ padding: 18px 24px 24px; }}
+    section h2 {{ margin: 14px 0 8px; }}
     a {{ color: #155eef; text-decoration: none; }}
     ul {{ list-style: none; padding: 0; margin: 0; }}
     li {{ margin-bottom: 8px; }}
     .site-link {{ display: block; padding: 10px; border-radius: 6px; border: 1px solid transparent; }}
     .selected {{ border-color: #155eef; background: #edf3ff; font-weight: 700; }}
-    table {{ width: 100%; border-collapse: collapse; margin: 16px 0 28px; background: #fff; }}
-    th, td {{ padding: 10px; border: 1px solid #d8deea; text-align: left; vertical-align: top; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 8px 0 18px; background: #fff; }}
+    th, td {{ padding: 8px; border: 1px solid #d8deea; text-align: left; vertical-align: top; }}
     th {{ background: #edf1f7; }}
     .status {{ display: inline-block; min-width: 96px; padding: 4px 8px; border-radius: 999px; text-align: center; font-weight: 700; }}
     .status-2xx {{ background: #d9f7be; color: #135200; }}
@@ -433,38 +435,48 @@ def _render_dashboard_page(
     .status-unknown {{ background: #f0f0f0; color: #595959; }}
     .stale {{ display: inline-block; padding: 4px 8px; border-radius: 999px; background: #fff1f0; color: #a8071a; font-weight: 700; }}
     .table-scroll {{ overflow-x: auto; }}
-    .overall-uptime {{ margin-top: -18px; }}
-    .toolbar {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }}
+    .overall-uptime {{ margin: -10px 0 12px; }}
+    .toolbar {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 8px 0; }}
     .toolbar label {{ display: grid; gap: 4px; font-weight: 700; }}
     .toolbar input {{ padding: 8px; border: 1px solid #b8c2d6; border-radius: 6px; }}
     .toolbar button {{ padding: 9px 12px; border: 0; border-radius: 6px; background: #155eef; color: #fff; font-weight: 700; cursor: pointer; }}
     .date-navigation {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
     .date-nav-link {{ display: inline-block; padding: 8px 10px; border: 1px solid #b8c2d6; border-radius: 6px; background: #fff; font-weight: 700; }}
     .date-nav-link.disabled {{ color: #98a2b3; background: #f2f4f7; cursor: not-allowed; }}
-    .chart-panel {{ background: #fff; border: 1px solid #d8deea; border-radius: 8px; padding: 16px; margin: 12px 0 24px; }}
+    .chart-panel {{ background: #fff; border: 1px solid #d8deea; border-radius: 8px; padding: 12px; margin: 8px 0 18px; font-size: 14px; }}
+    .chart-layout {{ display: grid; grid-template-columns: minmax(140px, 190px) minmax(0, 1fr); gap: 12px; align-items: start; }}
+    .chart-plot {{ min-width: 0; }}
     .chart {{ width: 100%; height: auto; min-height: 280px; overflow: visible; }}
     .axis {{ stroke: #b8c2d6; stroke-width: 1; }}
     .grid {{ stroke: #e6eaf2; stroke-width: 1; }}
     .series-segment {{ fill: none; stroke-width: 1.25; stroke-linecap: round; }}
-    .point-hit {{ fill: transparent; stroke: none; pointer-events: all; }}
+    .point-hit {{ fill: transparent; stroke: transparent; stroke-width: 2; pointer-events: all; }}
+    .point-hit:hover, .point-hit:focus {{ fill: #fff; stroke: var(--probe-color); outline: none; }}
     .problem-marker {{ stroke: #fff; stroke-width: 1.5; pointer-events: all; }}
-    .legend {{ display: flex; flex-wrap: wrap; gap: 10px 16px; margin: 12px 0; }}
+    .problem-marker:hover, .problem-marker:focus {{ stroke: #18202f; stroke-width: 3; outline: none; }}
+    .legend {{ display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }}
     .legend-item, .status-toggle {{ display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid #b8c2d6; border-radius: 999px; background: #fff; color: inherit; cursor: pointer; }}
     .legend-item[aria-pressed="false"] {{ opacity: 0.45; text-decoration: line-through; }}
+    .status-toggle[aria-pressed="true"] {{ border-color: #155eef; background: #edf3ff; box-shadow: 0 1px 4px rgba(21, 94, 239, 0.24); }}
+    .status-toggle[aria-pressed="false"] {{ color: #667085; background: #f2f4f7; border-style: dashed; opacity: 0.65; }}
     .swatch {{ width: 12px; height: 12px; border-radius: 999px; display: inline-block; }}
     .status-point-3xx {{ fill: #fa8c16; }}
     .status-point-4xx {{ fill: #f5222d; }}
     .status-point-5xx {{ fill: #a8071a; }}
     .status-point-network_error {{ fill: #5c0011; }}
     .status-point-probe_error {{ fill: #722ed1; }}
-    .status-key {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
-    .status-filters {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
-    .event-strip-label {{ fill: #667085; font-size: 12px; }}
+    .status-filters {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }}
+    .status-toggle .status {{ min-width: 0; padding: 2px 6px; }}
+    .event-strip-label {{ fill: #667085; font-size: 14px; }}
     .event-strip-line {{ stroke: #b8c2d6; stroke-width: 1; }}
     [hidden] {{ display: none !important; }}
     .muted {{ color: #667085; }}
     .error {{ padding: 10px; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; border-radius: 6px; }}
     .logout {{ background: none; border: 1px solid #b8c2d6; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
+    @media (max-width: 900px) {{
+      .chart-layout {{ grid-template-columns: 1fr; }}
+      .legend {{ flex-direction: row; flex-wrap: wrap; }}
+    }}
   </style>
 </head>
 <body>
@@ -478,14 +490,13 @@ def _render_dashboard_page(
       {sites_html}
     </aside>
     <section>
-      <h1>{escape(selected_name)}</h1>
-      <p class="muted">{escape(selected_url)}</p>
-      <h2>Probe Period Summary</h2>
+      <h2>Сводка по probes</h2>
       {statuses_html}
       <h2>Response Time History</h2>
       {date_form_html}
       {chart_html}
       <h2>Check Details</h2>
+      {detail_limit_form_html}
       {details_html}
       <h2>Problems for selected period</h2>
       {problems_html}
@@ -503,15 +514,15 @@ def _render_dashboard_page(
       saved.statuses ||= {{}};
 
       const probeButtons = [...chart.querySelectorAll("[data-probe-toggle]")];
-      const statusInputs = [...chart.querySelectorAll("[data-status-toggle]")];
+      const statusButtons = [...chart.querySelectorAll("[data-status-toggle]")];
       const enabled = (group, key) => saved[group][key] !== false;
 
       function applyFilters() {{
         probeButtons.forEach((button) => {{
           button.setAttribute("aria-pressed", String(enabled("probes", button.dataset.probeToggle)));
         }});
-        statusInputs.forEach((input) => {{
-          input.checked = enabled("statuses", input.dataset.statusToggle);
+        statusButtons.forEach((button) => {{
+          button.setAttribute("aria-pressed", String(enabled("statuses", button.dataset.statusToggle)));
         }});
         chart.querySelectorAll("[data-filter-item]").forEach((item) => {{
           const probeVisible = enabled("probes", item.dataset.probeId);
@@ -535,8 +546,9 @@ def _render_dashboard_page(
         persist();
         applyFilters();
       }}));
-      statusInputs.forEach((input) => input.addEventListener("change", () => {{
-        saved.statuses[input.dataset.statusToggle] = input.checked;
+      statusButtons.forEach((button) => button.addEventListener("click", () => {{
+        const key = button.dataset.statusToggle;
+        saved.statuses[key] = !enabled("statuses", key);
         persist();
         applyFilters();
       }}));
@@ -644,7 +656,7 @@ def _render_probe_period_summary(
     now: datetime,
 ) -> str:
     if not probes:
-        return '<p class="muted">No enabled probes configured.</p>'
+        return '<p class="muted">Нет включённых probes.</p>'
 
     summaries, overall_uptime = _summarize_probe_period(
         probes, period_results, period=period
@@ -655,15 +667,12 @@ def _render_probe_period_summary(
         result = latest_results.get(probe.id)
         summary = summaries_by_probe[probe.id]
         if result is None:
-            status_html = '<span class="status status-unknown">no data</span>'
-            checked_at = "never"
-            http_status = ""
+            checked_at_html = '<span class="muted">нет данных</span>'
         else:
-            status_html = _status_badge(result.status_group)
+            stale_html = ""
             if now - result.checked_at > STALE_AFTER:
-                status_html += ' <span class="stale">stale</span>'
-            checked_at = _format_datetime(result.checked_at)
-            http_status = str(result.http_status or result.error_type or "")
+                stale_html = ' <span class="stale">stale</span>'
+            checked_at_html = f"{escape(_format_datetime(result.checked_at))}{stale_html}"
 
         average_response = (
             f"{summary.average_response_time_ms:.1f} ms"
@@ -673,16 +682,14 @@ def _render_probe_period_summary(
         uptime = (
             f"{summary.uptime_percent:.1f}%"
             if summary.uptime_percent is not None
-            else "No data"
+            else "Нет данных"
         )
 
         rows.append(
             "<tr>"
             f"<td>{escape(probe.name)}</td>"
             f"<td>{escape(probe.region)}</td>"
-            f"<td>{status_html}</td>"
-            f"<td>{escape(http_status)}</td>"
-            f"<td>{escape(checked_at)}</td>"
+            f"<td>{checked_at_html}</td>"
             f"<td>{escape(average_response)}</td>"
             f"<td>{escape(uptime)}</td>"
             f"<td>{summary.received_checks}</td>"
@@ -695,16 +702,25 @@ def _render_probe_period_summary(
         )
 
     overall = (
-        f"Overall uptime across received checks: {overall_uptime:.1f}%"
+        f"Общий uptime по полученным проверкам: {overall_uptime:.1f}%"
         if overall_uptime is not None
-        else "Overall uptime: no data for the selected period."
+        else "Общий uptime: нет данных за выбранный период."
     )
-    status_headers = "".join(f"<th>{status_group}</th>" for status_group in STATUS_GROUPS)
+    status_labels = {
+        "2xx": "2xx",
+        "3xx": "3xx",
+        "4xx": "4xx",
+        "5xx": "5xx",
+        "network_error": "Сеть",
+        "probe_error": "Probe",
+    }
+    status_headers = "".join(
+        f"<th>{status_labels[status_group]}</th>" for status_group in STATUS_GROUPS
+    )
     return (
-        '<div class="table-scroll"><table><thead><tr><th>Probe</th><th>Region</th>'
-        "<th>Last Status</th><th>Last HTTP/Error</th><th>Last Checked At</th>"
-        "<th>Average Response Time</th><th>Uptime</th><th>Received</th>"
-        f"<th>Coverage</th>{status_headers}</tr></thead>"
+        '<div class="table-scroll"><table><thead><tr><th>Probe</th><th>Регион</th>'
+        "<th>Последняя проверка</th><th>Среднее время</th><th>Uptime</th>"
+        f"<th>Получено</th><th>Покрытие</th>{status_headers}</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
         f'<p class="muted overall-uptime">{escape(overall)}</p>'
     )
@@ -724,10 +740,6 @@ def _render_date_form(
     )
     message_html = (
         f'<p class="error">{escape(period.message)}</p>' if period.message else ""
-    )
-    limit_options = "".join(
-        f'<option value="{value}"{" selected" if value == detail_limit else ""}>{value}</option>'
-        for value in DETAIL_LIMITS
     )
     navigation_parameters = {
         "from_time": period.from_time.strftime("%H:%M"),
@@ -785,20 +797,38 @@ def _render_date_form(
           <input id="to_time" name="to_time" type="time"
             value="{period.to_time.strftime('%H:%M')}" required>
         </label>
-        <label for="limit">Check Details rows
-          <select id="limit" name="limit">{limit_options}</select>
-        </label>
+        <input type="hidden" name="limit" value="{detail_limit}">
         <button type="submit">Show</button>
       </form>
-      <div class="status-key">
-        {_status_badge("2xx")}
-        {_status_badge("3xx")}
-        {_status_badge("4xx")}
-        {_status_badge("5xx")}
-        {_status_badge("network_error")}
-        {_status_badge("probe_error")}
-      </div>
     """
+
+
+def _render_detail_limit_form(
+    selected_site: Site | None,
+    period: DashboardPeriod,
+    detail_limit: int,
+) -> str:
+    hidden_values: dict[str, int | str] = {
+        "date": period.selected_date.isoformat(),
+        "from_time": period.from_time.strftime("%H:%M"),
+        "to_time": period.to_time.strftime("%H:%M"),
+    }
+    if selected_site is not None:
+        hidden_values["site_id"] = selected_site.id
+    hidden_inputs = "".join(
+        f'<input type="hidden" name="{name}" value="{escape(str(value), quote=True)}">'
+        for name, value in hidden_values.items()
+    )
+    limit_options = "".join(
+        f'<option value="{value}"{" selected" if value == detail_limit else ""}>{value}</option>'
+        for value in DETAIL_LIMITS
+    )
+    return (
+        '<form class="toolbar details-toolbar" method="get" action="/dashboard">'
+        f'{hidden_inputs}<label for="limit">Строк на странице '
+        f'<select id="limit" name="limit">{limit_options}</select></label>'
+        '<button type="submit">Показать</button></form>'
+    )
 
 
 def _render_response_time_chart(
@@ -852,7 +882,7 @@ def _render_response_time_chart(
         label = (f"{hour:02d}:00" if hour < 24 else "24:00") + " MSK"
         grid_lines.append(
             f'<line class="grid" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_height}"></line>'
-            f'<text x="{x:.1f}" y="{height - 12}" text-anchor="middle" fill="#667085" font-size="12">{label}</text>'
+            f'<text x="{x:.1f}" y="{height - 12}" text-anchor="middle" fill="#667085" font-size="14">{label}</text>'
         )
 
     y_labels = []
@@ -861,7 +891,7 @@ def _render_response_time_chart(
         value = round(max_response_time * ratio)
         y_labels.append(
             f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" y2="{y:.1f}"></line>'
-            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" fill="#667085" font-size="12">{value} ms</text>'
+            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" fill="#667085" font-size="14">{value} ms</text>'
         )
 
     series_html = []
@@ -913,7 +943,9 @@ def _render_response_time_chart(
                 f'<circle class="{marker_class}" data-filter-item data-probe-id="{escape(probe_id)}" '
                 f'data-status-group="{escape(css_status)}" '
                 f'cx="{x_position(result.checked_at):.1f}" '
-                f'cy="{y_position(result.response_time_ms):.1f}" r="{marker_radius}">'
+                f'cy="{y_position(result.response_time_ms):.1f}" r="{marker_radius}" '
+                f'tabindex="0" aria-label="{escape(title, quote=True)}" '
+                f'style="--probe-color:{color}">'
                 f"<title>{escape(title)}</title></circle>"
             )
         events = []
@@ -932,7 +964,8 @@ def _render_response_time_chart(
             events.append(
                 f'<circle class="problem-marker status-point-{css_status}" data-filter-item '
                 f'data-probe-id="{escape(probe_id)}" data-status-group="{escape(css_status)}" '
-                f'cx="{x_position(result.checked_at):.1f}" cy="{top + plot_height + 32}" r="5">'
+                f'cx="{x_position(result.checked_at):.1f}" cy="{top + plot_height + 32}" r="5" '
+                f'tabindex="0" aria-label="{escape(title, quote=True)}">'
                 f"<title>{escape(title)}</title></circle>"
             )
         series_html.append(
@@ -945,8 +978,8 @@ def _render_response_time_chart(
         )
 
     status_toggles = "".join(
-        f'<label class="status-toggle"><input type="checkbox" data-status-toggle="{status_group}" checked>'
-        f'{_status_badge(status_group)}</label>'
+        f'<button class="status-toggle" type="button" data-status-toggle="{status_group}" '
+        f'aria-pressed="true">{_status_badge(status_group)}</button>'
         for status_group in STATUS_GROUPS
     )
     event_strip = (
@@ -958,15 +991,17 @@ def _render_response_time_chart(
 
     return (
         '<div class="chart-panel" data-response-chart>'
-        f'<div class="legend">{"".join(legend_items)}</div>'
         f'<div class="status-filters" aria-label="Status group filters">{status_toggles}</div>'
+        '<div class="chart-layout">'
+        f'<div class="legend" aria-label="Probe filters">{"".join(legend_items)}</div>'
+        '<div class="chart-plot">'
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
         'aria-label="Response time by probe for selected period">'
         f'{"".join(grid_lines)}{"".join(y_labels)}'
         f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"></line>'
         f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"></line>'
         f'{event_strip}{"".join(series_html)}'
-        "</svg></div>"
+        "</svg></div></div></div>"
     )
 
 
