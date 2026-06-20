@@ -37,6 +37,37 @@ PING - внутренний инструмент мониторинга дост
 - Python `3.12+`
 - Docker и Docker Compose для dev-запуска в контейнере
 
+### Local-only Central Без Авторизации
+
+Для быстрой UI-разработки используйте отдельный Compose-файл. Он не подключает `.env`, не требует admin credentials или session secret и сохраняет локальную SQLite-базу в Docker volume:
+
+```powershell
+docker compose -f docker-compose.local.yml up --build -d
+```
+
+Последующие запуски, проверка состояния, короткие логи и health check:
+
+```powershell
+docker compose -f docker-compose.local.yml up -d
+docker compose -f docker-compose.local.yml ps
+docker compose -f docker-compose.local.yml logs --tail=100 central
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Dashboard открывается без cookie и формы входа:
+
+```text
+http://localhost:8000/dashboard
+```
+
+Каталоги `central/`, `probe/` и `tests/` подключены через bind mounts. Изменения Python-файлов в `central/` подхватывает `uvicorn --reload`, поэтому image пересобирать не нужно. После изменения `Dockerfile.dev`, `pyproject.toml` или зависимостей выполните явный rebuild:
+
+```powershell
+docker compose -f docker-compose.local.yml up --build -d
+```
+
+Отключение dashboard auth действует только при одновременных `PING_ENV=development` и `PING_AUTH_DISABLED=true`. В `production` один флаг `PING_AUTH_DISABLED=true` не отключает авторизацию. Probe API по-прежнему требует token auth.
+
 ### Запуск Без Docker
 
 Создайте виртуальное окружение и установите зависимости:

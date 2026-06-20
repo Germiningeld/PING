@@ -10,6 +10,7 @@ import time
 
 ADMIN_SESSION_COOKIE = "ping_admin_session"
 ADMIN_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12
+LOCAL_ADMIN_USERNAME = "local-development"
 
 
 def hash_probe_token(token: str) -> str:
@@ -63,6 +64,13 @@ def admin_auth_configured() -> bool:
             get_admin_password_hash(),
             get_admin_session_secret(),
         )
+    )
+
+
+def admin_auth_disabled() -> bool:
+    return (
+        os.getenv("PING_ENV", "").lower() == "development"
+        and os.getenv("PING_AUTH_DISABLED", "").lower() in {"1", "true", "yes", "on"}
     )
 
 

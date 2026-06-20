@@ -134,6 +134,8 @@ def dashboard_client(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("PING_ADMIN_SESSION_SECRET", "test-session-secret")
     monkeypatch.setenv("PING_COOKIE_SECURE", "false")
+    monkeypatch.delenv("PING_ENV", raising=False)
+    monkeypatch.delenv("PING_AUTH_DISABLED", raising=False)
 
     def override_database_connection():
         connection = connect_database(database_path)
@@ -149,6 +151,43 @@ def dashboard_client(tmp_path, monkeypatch):
 
 
 def test_dashboard_redirects_unauthenticated_user_to_login(dashboard_client) -> None:
+    response = dashboard_client.get("/dashboard", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_local_development_mode_bypasses_dashboard_auth(
+    dashboard_client, monkeypatch
+) -> None:
+    monkeypatch.setenv("PING_ENV", "development")
+    monkeypatch.setenv("PING_AUTH_DISABLED", "true")
+
+    root_response = dashboard_client.get("/", follow_redirects=False)
+    dashboard_response = dashboard_client.get("/dashboard", follow_redirects=False)
+    login_response = dashboard_client.get("/login", follow_redirects=False)
+    login_submit_response = dashboard_client.post("/login", follow_redirects=False)
+    logout_response = dashboard_client.post("/logout", follow_redirects=False)
+
+    assert root_response.status_code == 303
+    assert root_response.headers["location"] == "/dashboard"
+    assert dashboard_response.status_code == 200
+    assert "PING Dashboard" in dashboard_response.text
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/dashboard"
+    assert login_submit_response.status_code == 303
+    assert login_submit_response.headers["location"] == "/dashboard"
+    assert logout_response.status_code == 303
+    assert logout_response.headers["location"] == "/dashboard"
+
+
+@pytest.mark.parametrize("ping_env", ["production", "staging", ""])
+def test_auth_disabled_flag_is_fail_closed_outside_development(
+    dashboard_client, monkeypatch, ping_env
+) -> None:
+    monkeypatch.setenv("PING_ENV", ping_env)
+    monkeypatch.setenv("PING_AUTH_DISABLED", "true")
+
     response = dashboard_client.get("/dashboard", follow_redirects=False)
 
     assert response.status_code == 303

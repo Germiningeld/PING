@@ -16,6 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from central.app.auth import (
     ADMIN_SESSION_COOKIE,
     ADMIN_SESSION_MAX_AGE_SECONDS,
+    LOCAL_ADMIN_USERNAME,
+    admin_auth_disabled,
     admin_auth_configured,
     cookie_secure_enabled,
     create_admin_session_token,
@@ -78,6 +80,8 @@ def root(request: Request) -> Response:
 
 @router.get("/login", response_class=HTMLResponse)
 def login_screen(request: Request) -> Response:
+    if admin_auth_disabled():
+        return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
     if _current_admin_username(request) is not None:
         return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
     return HTMLResponse(_render_login_page())
@@ -85,6 +89,9 @@ def login_screen(request: Request) -> Response:
 
 @router.post("/login")
 async def login(request: Request) -> Response:
+    if admin_auth_disabled():
+        return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
     form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
     username = form.get("username", [""])[0]
     password = form.get("password", [""])[0]
@@ -115,7 +122,8 @@ async def login(request: Request) -> Response:
 
 @router.post("/logout")
 def logout() -> Response:
-    response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    redirect_target = "/dashboard" if admin_auth_disabled() else "/login"
+    response = RedirectResponse(redirect_target, status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(
         ADMIN_SESSION_COOKIE,
         httponly=True,
@@ -227,6 +235,8 @@ def require_admin(request: Request) -> str:
 
 
 def _current_admin_username(request: Request) -> str | None:
+    if admin_auth_disabled():
+        return LOCAL_ADMIN_USERNAME
     return verify_admin_session_token(request.cookies.get(ADMIN_SESSION_COOKIE))
 
 

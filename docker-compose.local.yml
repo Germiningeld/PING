@@ -1,0 +1,30 @@
+services:
+  central:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      PING_ENV: development
+      PING_AUTH_DISABLED: "true"
+      PING_COOKIE_SECURE: "false"
+      PING_DATABASE_PATH: /app/data/ping.sqlite3
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./central:/app/central
+      - ./probe:/app/probe
+      - ./tests:/app/tests
+      - local-central-data:/app/data
+    command:
+      - uvicorn
+      - central.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/central
+
+volumes:
+  local-central-data:
