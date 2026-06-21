@@ -19,6 +19,7 @@ ENV/
 .env
 .env.*
 !.env.example
+/probe-config.json
 *.pem
 *.key
 *.crt
@@ -29,6 +30,7 @@ ENV/
 *.sqlite3
 data/
 storage/
+/probe-data/
 
 # Docker and logs
 docker-compose.override.yml

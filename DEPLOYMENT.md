@@ -81,7 +81,7 @@ docker compose -f docker-compose.probe.yml config
 На сервере central нужен локальный `.env`, который не коммитится:
 
 ```text
-PING_DATABASE_PATH=/data/ping.sqlite3
+PING_DATABASE_PATH=/app/data/ping.sqlite3
 PING_ADMIN_USERNAME=<admin-username>
 PING_ADMIN_PASSWORD_HASH=<pbkdf2-password-hash>
 PING_ADMIN_SESSION_SECRET=<random-session-secret>
@@ -119,7 +119,38 @@ python -c "from central.app.auth import hash_admin_password; print(hash_admin_pa
 2. Убедиться, что Docker и Docker Compose plugin установлены.
 3. Разместить проект в выбранном каталоге, например `/opt/ping`.
 4. Создать локальный `.env` на основе `.env.example`.
-5. Создать persistent directory или volume для SQLite database.
+   Убедиться, что файл принадлежит deployment-пользователю, и установить права `600`, не выводя содержимое файла:
+
+```bash
+chmod 600 /opt/ping/.env
+```
+
+5. Создать persistent directory для SQLite database:
+
+```bash
+mkdir -p /opt/ping/data
+```
+
+Для первого production запуска central compose использует bind mount:
+
+```yaml
+./data:/app/data
+```
+
+Внутри контейнера database path должен быть:
+
+```text
+PING_DATABASE_PATH=/app/data/ping.sqlite3
+```
+
+Compose публикует Central только на loopback:
+
+```yaml
+127.0.0.1:8000:8000
+```
+
+Публичный доступ к dashboard должен проходить через подтверждённый HTTPS reverse proxy. Не заменяйте loopback binding на `8000:8000`; production-specific IP, DNS workaround и адрес reverse proxy не должны фиксироваться в публичном Compose-примере.
+
 6. Запустить central:
 
 ```bash
@@ -148,11 +179,19 @@ curl -fsS http://localhost:8000/health
 2. Убедиться, что Docker и Docker Compose plugin установлены.
 3. Разместить проект или нужный compose/build context.
 4. Создать локальный `probe-config.json` с реальными `probe_id`, `probe_token` и `central_api_url`.
-5. В `docker-compose.probe.yml` заменить example mount на локальный config:
+   Убедиться, что файл принадлежит deployment-пользователю, и установить права `600`, не выводя содержимое файла:
+
+```bash
+chmod 600 /opt/ping/probe-config.json
+```
+
+5. Убедиться, что `docker-compose.probe.yml` монтирует локальный production config:
 
 ```yaml
 ./probe-config.json:/config/probe-config.json:ro
 ```
+
+Адрес `central_api_url` должен разрешаться штатным DNS на конкретном probe server. Если инфраструктуре нужен частный DNS workaround, задайте его в server-local override, а не добавляйте production IP в публичный Compose-файл.
 
 6. Запустить probe:
 

@@ -4,9 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile.probe
     volumes:
-      - ./configs/probe-config.example.json:/config/probe-config.json:ro
-      - probe-data:/app/data/probe
+      - ./probe-config.json:/config/probe-config.json:ro
+      - ./probe-data:/app/data/probe
     restart: unless-stopped
-
-volumes:
-  probe-data:

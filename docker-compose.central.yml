@@ -4,12 +4,16 @@ services:
       context: .
       dockerfile: Dockerfile.central
     env_file:
-      - .env.example
+      - .env
+    environment:
+      PING_ENV: production
+      PING_HOST: 0.0.0.0
+      PING_PORT: 8000
+      PING_DATABASE_PATH: /app/data/ping.sqlite3
+      PING_RETENTION_DAYS: 90
+      PING_COOKIE_SECURE: "true"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - central-data:/app/data
+      - ./data:/app/data
     restart: unless-stopped
-
-volumes:
-  central-data:

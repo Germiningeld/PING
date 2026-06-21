@@ -39,6 +39,45 @@ PING - внутренний инструмент мониторинга дост
 - Python `3.12+`
 - Docker и Docker Compose для dev-запуска в контейнере
 
+### Central С Настройками Из `.env`
+
+Production-подобный Central, использующий значения из локального `.env`, запустите в фоне:
+
+```powershell
+docker compose -f docker-compose.central.yml up --build -d central
+```
+
+Dashboard и health endpoint будут доступны по адресам:
+
+```text
+http://localhost:8000/dashboard
+http://localhost:8000/health
+```
+
+Compose публикует порт только на `127.0.0.1`. На production server внешний доступ должен идти через отдельно настроенный HTTPS reverse proxy; прямой публичный HTTP-доступ к `8000` не предусмотрен.
+
+После изменения `.env` обычного `docker compose restart` недостаточно: Docker не перечитывает environment контейнера при простом restart. Пересоздайте только Central без остановки всего Compose-проекта:
+
+```powershell
+docker compose -f docker-compose.central.yml up -d --force-recreate central
+```
+
+После изменения Python-файлов при запуске через `docker-compose.central.yml` исходный код нужно заново включить в image:
+
+```powershell
+docker compose -f docker-compose.central.yml up --build -d central
+```
+
+Проверка состояния и коротких логов:
+
+```powershell
+docker compose -f docker-compose.central.yml ps
+docker compose -f docker-compose.central.yml logs --tail=100 central
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Не используйте для обычного локального перезапуска `docker compose down`, `down -v` или `docker system prune`.
+
 ### Local-only Central Без Авторизации
 
 Для быстрой UI-разработки используйте отдельный Compose-файл. Он не подключает `.env`, не требует admin credentials или session secret и использует локальную SQLite-базу `data/dev-check.sqlite3` через bind mount:
@@ -93,6 +132,8 @@ docker compose -f docker-compose.dev.yml up --build
 ```
 
 Dev-контейнер монтирует `central/`, `probe/` и `tests/`, затем запускает FastAPI через `uvicorn --reload`. После изменения Python-файлов в `central/` приложение должно автоматически перезагрузиться без ручного перезапуска контейнера или процесса.
+
+Docker image при этом автоматически не пересобирается: изменённые Python-файлы попадают в контейнер через bind mount, а приложение перезапускает `uvicorn --reload`. Rebuild нужен после изменения `Dockerfile.dev`, `pyproject.toml` или зависимостей.
 
 ### Проверка Health Endpoint
 
@@ -155,7 +196,7 @@ Invoke-RestMethod http://localhost:8000/health
 Copy-Item configs\probe-config.example.json probe-config.json
 ```
 
-В `docker-compose.probe.yml` по умолчанию смонтирован example config. Для реального локального запуска замените mount на `./probe-config.json:/config/probe-config.json:ro`.
+`docker-compose.probe.yml` монтирует созданный локальный `./probe-config.json`; example-файл с placeholders контейнер не использует. Реальный config и каталог `probe-data/` исключены из Git.
 
 Запуск:
 
@@ -170,7 +211,7 @@ docker compose -f docker-compose.probe.yml ps
 docker compose -f docker-compose.probe.yml logs --tail=100 probe
 ```
 
-Probe-контейнер запускает `ping-probe --once` в 60-секундном цикле и хранит cache/queue в persistent volume `probe-data`.
+Probe-контейнер запускает `ping-probe --once` в 60-секундном цикле и хранит cache/queue в локальном bind mount `./probe-data`.
 
 ### Важные Docker Команды
 
