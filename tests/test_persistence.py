@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 
 from central.app.persistence import (
-    count_problem_results_for_site_in_period,
+    count_check_results_for_site_in_period,
     cleanup_check_results_older_than,
     get_probe,
     connect_database,
@@ -14,8 +14,6 @@ from central.app.persistence import (
     list_check_results_for_site_in_period,
     list_check_details_for_site_in_period,
     list_check_results_for_site,
-    list_recent_problem_results,
-    list_problem_results_for_site_in_period,
     seed_development_data,
 )
 
@@ -163,14 +161,7 @@ def test_dashboard_queries_filter_results_by_selected_date(tmp_path) -> None:
         site_id=site.id,
         selected_date=date(2026, 6, 19),
     )
-    recent_problems = list_recent_problem_results(
-        connection,
-        site_id=site.id,
-        selected_date=date(2026, 6, 19),
-    )
-
     assert daily_results == [selected_day_ok, selected_day_problem]
-    assert recent_problems == [selected_day_problem]
 
 
 def test_period_queries_use_half_open_utc_boundaries(tmp_path) -> None:
@@ -230,15 +221,7 @@ def test_period_queries_use_half_open_utc_boundaries(tmp_path) -> None:
         start_at=start_at,
         end_at=end_at,
     )
-    problems = list_problem_results_for_site_in_period(
-        connection,
-        site_id=site.id,
-        start_at=start_at,
-        end_at=end_at,
-    )
-
     assert results == [first, last_problem]
-    assert problems == [last_problem]
 
 
 def test_detail_query_is_newest_first_and_limited_without_limiting_period_data(
@@ -281,54 +264,36 @@ def test_detail_query_is_newest_first_and_limited_without_limiting_period_data(
         end_at=start_at + timedelta(minutes=3),
         limit=2,
     )
+    filtered_details = list_check_details_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=3),
+        limit=10,
+        probe_ids=(probe.id,),
+        status_groups=("2xx",),
+    )
+    filtered_count = count_check_results_for_site_in_period(
+        connection,
+        site_id=site.id,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=3),
+        probe_ids=(probe.id,),
+        status_groups=("2xx",),
+    )
 
     assert all_results == created
     assert details == [created[2], created[1]]
-
-
-def test_problem_count_is_independent_of_display_limit_and_results_are_newest_first(
-    tmp_path,
-) -> None:
-    connection = connect_database(tmp_path / "central.sqlite3")
-    initialize_database(connection)
-    site = create_site(connection, name="Example", url="https://example.com/")
-    probe = create_probe(
-        connection,
-        probe_id="ru-dc-1",
-        name="Russia Datacenter",
-        region="Russia",
-        token_hash="test-token-hash",
-    )
-    start_at = datetime(2026, 6, 19, 9, 0, tzinfo=UTC)
-    created = [
-        create_check_result(
-            connection,
-            site_id=site.id,
-            probe_id=probe.id,
-            checked_at=start_at + timedelta(minutes=index),
-            result_status="server_error",
-            status_group="5xx",
-            http_status=500,
-        )
-        for index in range(12)
-    ]
-
-    displayed = list_problem_results_for_site_in_period(
+    assert filtered_details == list(reversed(created))
+    assert filtered_count == 3
+    assert count_check_results_for_site_in_period(
         connection,
         site_id=site.id,
         start_at=start_at,
-        end_at=start_at + timedelta(minutes=12),
-    )
-    total = count_problem_results_for_site_in_period(
-        connection,
-        site_id=site.id,
-        start_at=start_at,
-        end_at=start_at + timedelta(minutes=12),
-    )
-
-    assert len(displayed) == 10
-    assert displayed == list(reversed(created[2:]))
-    assert total == 12
+        end_at=start_at + timedelta(minutes=3),
+        probe_ids=(),
+        status_groups=("2xx",),
+    ) == 0
 
 
 def test_cleanup_check_results_older_than_deletes_only_expired_raw_results(tmp_path) -> None:

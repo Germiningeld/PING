@@ -1,0 +1,41 @@
+{% if summary_view.rows %}
+<div class="table-responsive">
+    <table class="table table-sm table-bordered align-middle">
+        <thead>
+            <tr>
+                <th>Probe</th>
+                <th>Регион</th>
+                <th>Последняя проверка</th>
+                <th>Среднее время</th>
+                <th>Uptime</th>
+                <th>Получено</th>
+                <th>Покрытие</th>
+                {% for status in summary_view.status_groups %}
+                <th>{{ summary_view.status_labels[status] }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in summary_view.rows %}
+            <tr>
+                <td>{{ row.name }}</td>
+                <td>{{ row.region }}</td>
+                <td>{% if row.checked_at %}{{ row.checked_at }}{% if row.stale %} <span
+                        class="badge text-bg-danger">stale</span>{% endif %}{% else %}<span class="muted">нет
+                        данных</span>{% endif %}</td>
+                <td>{{ row.average_response }}</td>
+                <td>{{ row.uptime }}</td>
+                <td>{{ row.received_checks }}</td>
+                <td>{{ row.coverage }}</td>
+                {% for status in summary_view.status_groups %}
+                <td>{{ row.status_counts[status] }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+<p class="muted overall-uptime">{{ summary_view.overall }}</p>
+{% else %}
+<p class="muted">Нет включённых probes.</p>
+{% endif %}

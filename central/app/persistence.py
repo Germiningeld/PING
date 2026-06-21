@@ -284,26 +284,78 @@ def list_check_details_for_site_in_period(
     start_at: datetime,
     end_at: datetime,
     limit: int,
+    offset: int = 0,
+    probe_ids: tuple[str, ...] | None = None,
+    status_groups: tuple[str, ...] | None = None,
 ) -> list[CheckResult]:
-    """Return newest results for the details table in a half-open UTC interval."""
+    """Return newest filtered detail rows in the half-open UTC interval."""
+    if probe_ids == () or status_groups == ():
+        return []
+    filters = []
+    parameters: list[object] = [
+        site_id,
+        _to_db_datetime(start_at),
+        _to_db_datetime(end_at),
+    ]
+    if probe_ids is not None:
+        filters.append(f"AND probe_id IN ({','.join('?' for _ in probe_ids)})")
+        parameters.extend(probe_ids)
+    if status_groups is not None:
+        filters.append(f"AND status_group IN ({','.join('?' for _ in status_groups)})")
+        parameters.extend(status_groups)
+    parameters.extend((limit, offset))
     rows = connection.execute(
-        """
+        f"""
         SELECT *
         FROM check_results
         WHERE site_id = ?
             AND checked_at >= ?
             AND checked_at < ?
+            {' '.join(filters)}
         ORDER BY checked_at DESC, probe_id, id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (
-            site_id,
-            _to_db_datetime(start_at),
-            _to_db_datetime(end_at),
-            limit,
-        ),
+        parameters,
     ).fetchall()
     return [_row_to_check_result(row) for row in rows]
+
+
+def count_check_results_for_site_in_period(
+    connection: sqlite3.Connection,
+    *,
+    site_id: int,
+    start_at: datetime,
+    end_at: datetime,
+    probe_ids: tuple[str, ...] | None = None,
+    status_groups: tuple[str, ...] | None = None,
+) -> int:
+    """Count filtered detail rows in the half-open UTC interval."""
+    if probe_ids == () or status_groups == ():
+        return 0
+    filters = []
+    parameters: list[object] = [
+        site_id,
+        _to_db_datetime(start_at),
+        _to_db_datetime(end_at),
+    ]
+    if probe_ids is not None:
+        filters.append(f"AND probe_id IN ({','.join('?' for _ in probe_ids)})")
+        parameters.extend(probe_ids)
+    if status_groups is not None:
+        filters.append(f"AND status_group IN ({','.join('?' for _ in status_groups)})")
+        parameters.extend(status_groups)
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS result_count
+        FROM check_results
+        WHERE site_id = ?
+            AND checked_at >= ?
+            AND checked_at < ?
+            {' '.join(filters)}
+        """,
+        parameters,
+    ).fetchone()
+    return int(row["result_count"])
 
 
 def list_latest_results_for_site_by_probe(
@@ -334,93 +386,6 @@ def list_latest_results_for_site_by_probe(
         result = _row_to_check_result(row)
         latest_results.setdefault(result.probe_id, result)
     return latest_results
-
-
-def list_recent_problem_results(
-    connection: sqlite3.Connection,
-    *,
-    site_id: int,
-    selected_date: date | None = None,
-    limit: int = 10,
-) -> list[CheckResult]:
-    date_filter = ""
-    parameters: list[object] = [site_id]
-    if selected_date is not None:
-        start_at = datetime.combine(selected_date, time.min, tzinfo=UTC)
-        end_at = datetime.combine(selected_date, time.max, tzinfo=UTC)
-        date_filter = "AND checked_at >= ? AND checked_at <= ?"
-        parameters.extend([_to_db_datetime(start_at), _to_db_datetime(end_at)])
-    parameters.append(limit)
-
-    rows = connection.execute(
-        f"""
-        SELECT *
-        FROM check_results
-        WHERE site_id = ?
-            AND status_group != '2xx'
-            {date_filter}
-        ORDER BY checked_at DESC, id DESC
-        LIMIT ?
-        """,
-        parameters,
-    ).fetchall()
-    return [_row_to_check_result(row) for row in rows]
-
-
-def list_problem_results_for_site_in_period(
-    connection: sqlite3.Connection,
-    *,
-    site_id: int,
-    start_at: datetime,
-    end_at: datetime,
-    limit: int = 10,
-) -> list[CheckResult]:
-    """Return newest non-2xx results in the half-open UTC interval."""
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM check_results
-        WHERE site_id = ?
-            AND status_group != '2xx'
-            AND checked_at >= ?
-            AND checked_at < ?
-        ORDER BY checked_at DESC, id DESC
-        LIMIT ?
-        """,
-        (
-            site_id,
-            _to_db_datetime(start_at),
-            _to_db_datetime(end_at),
-            limit,
-        ),
-    ).fetchall()
-    return [_row_to_check_result(row) for row in rows]
-
-
-def count_problem_results_for_site_in_period(
-    connection: sqlite3.Connection,
-    *,
-    site_id: int,
-    start_at: datetime,
-    end_at: datetime,
-) -> int:
-    """Count non-2xx results in the half-open UTC interval."""
-    row = connection.execute(
-        """
-        SELECT COUNT(*) AS problem_count
-        FROM check_results
-        WHERE site_id = ?
-            AND status_group != '2xx'
-            AND checked_at >= ?
-            AND checked_at < ?
-        """,
-        (
-            site_id,
-            _to_db_datetime(start_at),
-            _to_db_datetime(end_at),
-        ),
-    ).fetchone()
-    return int(row["problem_count"])
 
 
 def cleanup_check_results_older_than(

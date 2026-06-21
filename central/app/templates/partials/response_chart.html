@@ -1,0 +1,69 @@
+{% macro status_badge(status) -%}<span class="status badge status-{{ status }}">{{ status }}</span>{%- endmacro %}
+{% if chart %}
+<div class="chart-panel" data-response-chart>
+  <div class="chart-layout">
+    <div class="chart-plot">
+      <svg class="chart" viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+        aria-label="Время ответа по probes за выбранный период">
+        {% for tick in chart.grid_ticks %}
+        <line class="grid" x1="{{ tick.x }}" y1="{{ chart.top }}" x2="{{ tick.x }}" y2="{{ chart.bottom }}"></line>
+        <text class="axis-label" x="{{ tick.x }}" y="{{ chart.height - 12 }}" text-anchor="middle">{{
+          tick.label }}</text>
+        {% endfor %}
+        {% for tick in chart.y_ticks %}
+        <line class="grid" x1="{{ chart.left }}" y1="{{ tick.y }}" x2="{{ chart.right }}" y2="{{ tick.y }}"></line>
+        <text class="axis-label" data-y-axis-label x="{{ chart.left - 8 }}" y="{{ tick.label_y }}" text-anchor="end">{{
+          tick.label }}</text>
+        {% endfor %}
+        <line class="axis" x1="{{ chart.left }}" y1="{{ chart.bottom }}" x2="{{ chart.right }}" y2="{{ chart.bottom }}">
+        </line>
+        <line class="axis" x1="{{ chart.left }}" y1="{{ chart.top }}" x2="{{ chart.left }}" y2="{{ chart.bottom }}">
+        </line>
+        <line class="event-strip-line" x1="{{ chart.left }}" y1="{{ chart.event_y }}" x2="{{ chart.right }}"
+          y2="{{ chart.event_y }}"></line>
+        <text class="event-strip-label" x="{{ chart.event_label_x }}" y="{{ chart.event_label_y }}"
+          text-anchor="end">Ошибки</text>
+        {% for item in chart.series %}
+        <g data-probe-series="{{ item.probe_id }}">
+          {% for segment in item.segments %}
+          <line class="series-segment" data-filter-item data-probe-id="{{ item.probe_id }}"
+            data-statuses="{{ segment.statuses }}" style="stroke:{{ segment.color }}" x1="{{ segment.x1 }}"
+            y1="{{ segment.y1 }}" x2="{{ segment.x2 }}" y2="{{ segment.y2 }}"{% if not segment.visible %} hidden{% endif %}></line>
+          {% endfor %}{% for marker in item.markers %}
+          <g class="response-point" data-filter-item data-probe-id="{{ item.probe_id }}"
+            data-status-group="{{ marker.status_group }}" data-response-ms="{{ marker.response_time_ms }}"{% if not marker.visible %} hidden{% endif %}>
+            <circle class="point-hit" cx="{{ marker.cx }}" cy="{{ marker.cy }}" r="8" tabindex="0"
+              aria-label="{{ marker.title }}" style="--probe-color:{{ marker.color }}"><title>{{ marker.title }}</title></circle>
+            <circle class="point-active {{ marker.class_name }}" cx="{{ marker.cx }}" cy="{{ marker.cy }}" r="2"
+              style="--probe-color:{{ marker.color }}" aria-hidden="true"></circle>
+          </g>
+          {% endfor %}{% for event in item.events %}
+          <circle class="{{ event.class_name }}" data-filter-item data-probe-id="{{ item.probe_id }}"
+            data-status-group="{{ event.status_group }}" cx="{{ event.cx }}" cy="{{ chart.event_y }}" r="5" tabindex="0"
+            aria-label="{{ event.title }}"{% if not event.visible %} hidden{% endif %}>
+            <title>{{ event.title }}</title>
+          </circle>
+          {% endfor %}
+        </g>
+        {% endfor %}
+      </svg>
+      {% if not chart.has_visible_response_data %}<p class="chart-empty-state">Нет видимых данных о времени ответа</p>{% endif %}
+    </div>
+    <div class="chart-controls">
+      <div class="legend" aria-label="Фильтры probes">{% for item in chart.legends %}
+        <button class="legend-item btn btn-sm" type="button" aria-label="Показать или скрыть probe {{ item.name }}"
+        data-probe-toggle="{{ item.probe_id }}" aria-pressed="{{ item.enabled | lower }}">
+          <span class="swatch" style="background:{{ item.color }}"></span>
+          {{ item.name }}
+      </button>{% endfor %}
+      </div>
+      <div class="status-filters" aria-label="Фильтры групп статусов">{% for status in chart.status_groups %}<button
+        class="status-toggle btn btn-sm" type="button" aria-label="Показать или скрыть статус {{ status.name }}"
+        data-status-toggle="{{ status.name }}" aria-pressed="{{ status.enabled | lower }}">{{ status_badge(status.name) }}</button>{% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% else %}
+<p class="muted">Нет данных о времени ответа за выбранный период.</p>
+{% endif %}

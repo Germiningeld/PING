@@ -22,7 +22,9 @@ PING - внутренний инструмент мониторинга дост
 
 ## Структура Проекта
 
-- `central/` - центральное FastAPI-приложение. Сейчас содержит `/health`, SQLite persistence слой, authenticated probe API и admin dashboard shell.
+- `central/` - центральное FastAPI-приложение с `/health`, SQLite persistence, authenticated probe API и server-rendered dashboard.
+- `central/app/templates/` - Jinja2 templates login/dashboard и presentation partials.
+- `central/app/static/css/` - пользовательские стили web-слоя; локальный Bootstrap хранится отдельно в `central/app/static/`.
 - `probe/` - lightweight probe agent MVP: синхронизация config с central API, HTTP `GET` проверки без редиректов, локальный cache и очередь результатов.
 - `tests/` - базовые тесты импортов, `/health`, persistence layer, probe API и probe agent.
 - `docker-compose.central.yml` - пример запуска central через Docker Compose.

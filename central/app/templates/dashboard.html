@@ -1,0 +1,196 @@
+{% macro status_badge(row) -%}<span class="status badge status-{{ row.status_css }}">{{ row.status_group }}</span>{%-
+endmacro %}
+{% macro date_action(action) -%}{% if action.disabled %}<span class="btn btn-outline-secondary disabled"
+    aria-disabled="true" aria-label="{{ action.aria_label }}">{{ action.label }}</span>{% else %}<a
+    class="btn btn-outline-secondary" aria-label="{{ action.aria_label }}" href="{{ action.href }}">{{ action.label
+    }}</a>{% endif %}{%- endmacro %}
+{% macro result_table(rows) -%}
+{% if rows %}
+<div class="table-responsive">
+    <table class="table table-sm table-striped table-bordered align-middle">
+        <thead>
+            <tr>
+                <th>Время (MSK)</th>
+                <th>Probe</th>
+                <th>Статус</th>
+                <th>HTTP/ошибка</th>
+                <th>Время ответа</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td>{{ row.checked_at }}</td>
+                <td>{{ row.probe_name }}</td>
+                <td>{{ status_badge(row) }}</td>
+                <td>{{ row.detail }}</td>
+                <td>{{ row.response_time }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p class="muted">Нет результатов проверок за выбранный период.</p>
+{% endif %}
+{%- endmacro %}
+<!doctype html>
+<html lang="ru">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PING Dashboard</title>
+    <link rel="stylesheet" href="/assets/bootstrap.min.css">
+    <link rel="stylesheet" href="/assets/css/dashboard.css">
+</head>
+
+<body>
+    <header>
+        <div><a class="brand-link" href="/dashboard"><strong>PING — мониторинг</strong></a> <span
+                class="muted">пользователь: {{ username }}</span></div>
+        <form method="post" action="/logout"><button class="btn btn-outline-secondary btn-sm"
+                type="submit">Выйти</button></form>
+    </header>
+    <main>
+        <aside>
+            <h2>Сайты</h2>
+            {% if sites_view %}
+            <ul class="nav flex-column">
+                {% for site in sites_view %}
+                <li><a class="site-link{% if site.selected %} selected{% endif %}" href="{{ site.href }}">{{ site.name
+                        }}</a></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="muted">Нет активных сайтов.</p>
+            {% endif %}
+        </aside>
+        <section>
+            <h2>Сводка по probes</h2>
+            {% include "partials/probe_summary.html" %}
+            <h2>История времени ответа</h2>
+            {% if date_form.message %}
+            <p class="error">{{ date_form.message }}</p>
+            {% endif %}
+            <form class="toolbar" method="get" action="/dashboard">
+                {% if date_form.site_id %}<input type="hidden" name="site_id" value="{{ date_form.site_id }}">{% endif
+                %}
+                <nav class="date-navigation" aria-label="Навигация по датам">{{ date_action(date_form.previous) }}<label
+                        for="date">Дата<input class="form-control" id="date" name="date" type="date"
+                            value="{{ date_form.selected_date }}" min="{{ date_form.min_date }}"
+                            max="{{ date_form.max_date }}"></label>{{ date_action(date_form.next) }}</nav>
+                {{ date_action(date_form.today) }}<label for="from_time">From (MSK)<input class="form-control"
+                        id="from_time" name="from_time" type="time" value="{{ date_form.from_time }}"
+                        min="00:00" max="23:59" step="60" required></label><label for="to_time">To (MSK)<input class="form-control" id="to_time"
+                        name="to_time" type="time" value="{{ date_form.to_time }}" min="00:00" max="23:59" step="60" required></label><input type="hidden"
+                    name="limit" value="{{ date_form.detail_limit }}"><input type="hidden" name="probes"
+                    value="{{ date_form.probes }}"><input type="hidden" name="statuses" value="{{ date_form.statuses }}"><button class="btn btn-primary"
+                    type="submit">Показать</button>
+            </form>
+            {% include "partials/response_chart.html" %}
+            <h2>Детали проверок</h2>
+            {{ result_table(detail_rows) }}
+            <div class="details-pagination d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <p class="pagination-summary">Страница {{ pagination.page }} из {{ pagination.total_pages }}; всего
+                    результатов: {{ pagination.count }}</p>
+                <div class="d-flex align-items-center gap-2">
+                    <form class="limit-form" method="get" action="/dashboard">{% if detail_controls.site_id %}<input
+                            type="hidden" name="site_id" value="{{ detail_controls.site_id }}">{% endif %}<input
+                            type="hidden" name="date" value="{{ detail_controls.date }}"><input type="hidden"
+                            name="from_time" value="{{ detail_controls.from_time }}"><input type="hidden" name="to_time"
+                            value="{{ detail_controls.to_time }}"><input type="hidden" name="probes"
+                            value="{{ detail_controls.probes }}"><input type="hidden" name="statuses"
+                            value="{{ detail_controls.statuses }}"><label for="limit">Строк:</label><select
+                            class="form-select form-select-sm" id="limit" name="limit" aria-label="Строк на странице"
+                            onchange="this.form.submit()">{% for value in detail_controls.detail_limits %}<option
+                                value="{{ value }}"{% if value==detail_controls.detail_limit %} selected{% endif %}>{{ value
+                                }}</option>{% endfor %}</select></form>
+                    <nav aria-label="Страницы деталей проверок">
+                    <div class="pagination pagination-sm mb-0"><span
+                            class="page-item{% if not pagination.previous_href %} disabled{% endif %}" {% if not
+                            pagination.previous_href %} aria-disabled="true" {% endif %}>{% if pagination.previous_href
+                            %}<a class="page-link" href="{{ pagination.previous_href }}">Назад</a>{% else %}<span
+                                class="page-link">Назад</span>{% endif %}</span><span
+                            class="page-item{% if not pagination.next_href %} disabled{% endif %}" {% if not
+                            pagination.next_href %} aria-disabled="true" {% endif %}>{% if pagination.next_href %}<a
+                                class="page-link" href="{{ pagination.next_href }}">Вперёд</a>{% else %}<span
+                                class="page-link">Вперёд</span>{% endif %}</span></div>
+                    </nav>
+                </div>
+            </div>
+        </section>
+    </main>
+    <script>
+        {% if auto_refresh %}window.setTimeout(() => window.location.reload(), 60_000);{% endif %}
+        (() => {
+            const storageKey = "ping-dashboard-chart-filters-v1";
+            const chart = document.querySelector("[data-response-chart]");
+            const bindFilterButtons = (selector, parameter, dataKey) => {
+                if (!chart) return;
+                const buttons = [...chart.querySelectorAll(selector)];
+                buttons.forEach((button) => button.addEventListener("click", () => {
+                    button.setAttribute("aria-pressed", String(button.getAttribute("aria-pressed") !== "true"));
+                    const enabled = buttons
+                        .filter((item) => item.getAttribute("aria-pressed") === "true")
+                        .map((item) => item.dataset[dataKey]);
+                    const url = new URL(window.location.href);
+                    url.searchParams.set(parameter, enabled.join(","));
+                    url.searchParams.delete("page");
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(storageKey)) || {};
+                        saved[parameter] = enabled;
+                        localStorage.setItem(storageKey, JSON.stringify(saved));
+                    } catch (_) {}
+                    window.location.assign(url);
+                }));
+            };
+            bindFilterButtons("[data-probe-toggle]", "probes", "probeToggle");
+            bindFilterButtons("[data-status-toggle]", "statuses", "statusToggle");
+
+            const sizeAxisLabels = () => {
+                if (!chart) return;
+                const svg = chart.querySelector("svg.chart");
+                if (!svg || !svg.viewBox.baseVal.width) return;
+                const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+                svg.querySelectorAll(".axis-label, .event-strip-label").forEach((label) => {
+                    label.style.fontSize = `${14 / Math.max(scale, 0.01)}px`;
+                });
+            };
+            sizeAxisLabels();
+            window.addEventListener("resize", sizeAxisLabels);
+
+            const toMinutes = (value) => {
+                const [hours, minutes] = value.split(":").map(Number);
+                return hours * 60 + minutes;
+            };
+            const formatMinutes = (value) => `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+            const setBoundedTime = (input, delta) => {
+                const current = Number.isFinite(toMinutes(input.value)) ? toMinutes(input.value) : 0;
+                const next = Math.min(1439, Math.max(0, current + delta));
+                if (next !== current) {
+                    input.value = formatMinutes(next);
+                    input.dispatchEvent(new Event("input", { bubbles: true }));
+                }
+                return next;
+            };
+            document.querySelectorAll('input[type="time"]').forEach((input) => {
+                input.addEventListener("wheel", (event) => {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    const next = setBoundedTime(input, event.deltaY < 0 ? 1 : -1);
+                    window.requestAnimationFrame(() => { input.value = formatMinutes(next); });
+                }, { passive: false, capture: true });
+                input.addEventListener("keydown", (event) => {
+                    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    const next = setBoundedTime(input, event.key === "ArrowUp" ? 1 : -1);
+                    window.requestAnimationFrame(() => { input.value = formatMinutes(next); });
+                }, { capture: true });
+            });
+        })();
+    </script>
+</body>
+
+</html>

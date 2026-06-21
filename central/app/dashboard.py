@@ -5,13 +5,15 @@ from hashlib import sha256
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from html import escape
+from math import ceil
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import parse_qs, urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
 
 from central.app.auth import (
     ADMIN_SESSION_COOKIE,
@@ -26,14 +28,13 @@ from central.app.auth import (
 )
 from central.app.models import CheckResult, Probe, Site
 from central.app.persistence import (
-    count_problem_results_for_site_in_period,
+    count_check_results_for_site_in_period,
     get_site,
     list_active_sites,
     list_check_details_for_site_in_period,
     list_check_results_for_site_in_period,
     list_enabled_probes,
     list_latest_results_for_site_by_probe,
-    list_problem_results_for_site_in_period,
     seed_development_data,
 )
 from central.app.probe_api import DatabaseConnection
@@ -49,6 +50,10 @@ PROBE_INTERVAL_SECONDS = 60
 STALE_AFTER = timedelta(minutes=3)
 DETAIL_LIMITS = (20, 50, 100, 250)
 DEFAULT_DETAIL_LIMIT = 50
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+TEMPLATE_DIR = APP_DIR / "templates"
+templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,20 @@ class DashboardPeriod:
     start_at: datetime
     end_at: datetime
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class DashboardFilters:
+    probe_ids: tuple[str, ...]
+    status_groups: tuple[str, ...]
+
+    @property
+    def probe_query(self) -> str:
+        return ",".join(self.probe_ids)
+
+    @property
+    def status_query(self) -> str:
+        return ",".join(self.status_groups)
 
 
 @dataclass(frozen=True)
@@ -84,7 +103,7 @@ def login_screen(request: Request) -> Response:
         return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
     if _current_admin_username(request) is not None:
         return RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
-    return HTMLResponse(_render_login_page())
+    return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
 @router.post("/login")
@@ -97,14 +116,18 @@ async def login(request: Request) -> Response:
     password = form.get("password", [""])[0]
 
     if not admin_auth_configured():
-        return HTMLResponse(
-            _render_login_page(error="Admin credentials are not configured."),
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Admin credentials are not configured."},
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
     if not verify_admin_credentials(username=username, password=password):
-        return HTMLResponse(
-            _render_login_page(error="Invalid username or password."),
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Invalid username or password."},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
@@ -142,6 +165,9 @@ def dashboard(
     from_time: Annotated[str | None, Query()] = None,
     to_time: Annotated[str | None, Query()] = None,
     limit: Annotated[str | None, Query()] = None,
+    page: Annotated[str | None, Query()] = None,
+    probe_filter: Annotated[str | None, Query(alias="probes")] = None,
+    status_filter: Annotated[str | None, Query(alias="statuses")] = None,
 ) -> Response:
     username = _current_admin_username(request)
     if username is None:
@@ -161,6 +187,12 @@ def dashboard(
         max_date=today,
     )
     detail_limit = _parse_detail_limit(limit)
+    detail_page = _parse_detail_page(page)
+    filters = _parse_dashboard_filters(
+        probe_filter,
+        status_filter,
+        probes=probes,
+    )
     latest_results = (
         list_latest_results_for_site_by_probe(connection, site_id=selected_site.id)
         if selected_site is not None
@@ -183,33 +215,26 @@ def dashboard(
             start_at=period.start_at,
             end_at=period.end_at,
             limit=detail_limit,
+            offset=(detail_page - 1) * detail_limit,
+            probe_ids=filters.probe_ids,
+            status_groups=filters.status_groups,
         )
         if selected_site is not None
         else []
     )
-    recent_problems = (
-        list_problem_results_for_site_in_period(
+    detail_count = (
+        count_check_results_for_site_in_period(
             connection,
             site_id=selected_site.id,
             start_at=period.start_at,
             end_at=period.end_at,
-        )
-        if selected_site is not None
-        else []
-    )
-    problem_count = (
-        count_problem_results_for_site_in_period(
-            connection,
-            site_id=selected_site.id,
-            start_at=period.start_at,
-            end_at=period.end_at,
+            probe_ids=filters.probe_ids,
+            status_groups=filters.status_groups,
         )
         if selected_site is not None
         else 0
     )
-
-    return HTMLResponse(
-        _render_dashboard_page(
+    context = _build_dashboard_context(
             username=username,
             sites=sites,
             selected_site=selected_site,
@@ -217,13 +242,18 @@ def dashboard(
             latest_results=latest_results,
             period_results=period_results,
             detail_results=detail_results,
-            recent_problems=recent_problems,
-            problem_count=problem_count,
             detail_limit=detail_limit,
+            detail_page=detail_page,
+            detail_count=detail_count,
             period=period,
+            filters=filters,
             min_date=min_date,
             max_date=today,
         )
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        context,
     )
 
 
@@ -276,11 +306,11 @@ def _parse_dashboard_period(
         selected_date = date.fromisoformat(date_value) if date_value else max_date
     except ValueError:
         selected_date = max_date
-        messages.append("Invalid date was reset to today.")
+        messages.append("Некорректная дата заменена сегодняшней.")
 
     bounded_date = _bounded_date(selected_date, min_date=min_date, max_date=max_date)
     if bounded_date != selected_date:
-        messages.append("Date was limited to the available retention window.")
+        messages.append("Дата ограничена доступным периодом хранения.")
     selected_date = bounded_date
 
     selected_from = _parse_time_value(
@@ -298,7 +328,7 @@ def _parse_dashboard_period(
     if selected_from > selected_to:
         selected_from = DEFAULT_FROM_TIME
         selected_to = DEFAULT_TO_TIME
-        messages.append("From must not be later than To; the full day was selected.")
+        messages.append("From не может быть позже To; выбран полный день.")
 
     local_start = datetime.combine(selected_date, selected_from, tzinfo=MSK)
     local_end = datetime.combine(selected_date, selected_to, tzinfo=MSK) + timedelta(
@@ -326,273 +356,106 @@ def _parse_time_value(
     try:
         return datetime.strptime(value, "%H:%M").time()
     except ValueError:
-        messages.append(f"Invalid {field_name} time was reset.")
+        messages.append(f"Некорректное время {field_name} сброшено.")
         return default
 
 
-def _render_login_page(*, error: str | None = None) -> str:
-    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PING Admin Login</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #18202f; }}
-    main {{ max-width: 360px; margin: 12vh auto; padding: 24px; background: #fff; border: 1px solid #d8deea; border-radius: 8px; }}
-    label {{ display: block; margin: 14px 0 6px; font-weight: 700; }}
-    input {{ box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #b8c2d6; border-radius: 6px; }}
-    button {{ margin-top: 18px; width: 100%; padding: 10px 12px; border: 0; border-radius: 6px; background: #155eef; color: #fff; font-weight: 700; cursor: pointer; }}
-    .error {{ padding: 10px; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; border-radius: 6px; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>PING Admin</h1>
-    {error_html}
-    <form method="post" action="/login">
-      <label for="username">Username</label>
-      <input id="username" name="username" autocomplete="username" required>
-      <label for="password">Password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required>
-      <button type="submit">Sign in</button>
-    </form>
-  </main>
-</body>
-</html>"""
-
-
-def _render_dashboard_page(
+def _parse_dashboard_filters(
+    probe_value: str | None,
+    status_value: str | None,
     *,
-    username: str,
-    sites: list[Site],
-    selected_site: Site | None,
     probes: list[Probe],
-    latest_results: dict[str, CheckResult],
-    period_results: list[CheckResult],
-    detail_results: list[CheckResult],
-    recent_problems: list[CheckResult],
-    problem_count: int,
-    detail_limit: int,
-    period: DashboardPeriod,
-    min_date: date,
-    max_date: date,
-) -> str:
-    sites_html = _render_sites(sites, selected_site, period, detail_limit)
-    statuses_html = _render_probe_period_summary(
-        probes,
-        latest_results,
-        period_results,
-        period=period,
-        now=datetime.now(UTC),
-    )
-    date_form_html = _render_date_form(
-        selected_site, period, min_date, max_date, detail_limit
-    )
-    detail_limit_form_html = _render_detail_limit_form(
-        selected_site, period, detail_limit
-    )
-    chart_html = _render_response_time_chart(period_results, probes)
-    details_html = _render_daily_details(detail_results, probes)
-    problems_html = _render_recent_problems(
-        recent_problems, probes, total_count=problem_count
-    )
-    auto_refresh_script = (
-        "window.setTimeout(() => window.location.reload(), 60_000);"
-        if period.selected_date == max_date
-        else ""
+) -> DashboardFilters:
+    allowed_probes = tuple(probe.id for probe in probes)
+
+    def selected(value: str | None, allowed: tuple[str, ...]) -> tuple[str, ...]:
+        if value is None:
+            return allowed
+        requested = set(filter(None, value.split(",")))
+        return tuple(item for item in allowed if item in requested)
+
+    return DashboardFilters(
+        probe_ids=selected(probe_value, allowed_probes),
+        status_groups=selected(status_value, STATUS_GROUPS),
     )
 
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PING Dashboard</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #18202f; }}
-    header {{ display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: #fff; border-bottom: 1px solid #d8deea; }}
-    main {{ display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 66px); }}
-    aside {{ padding: 20px; border-right: 1px solid #d8deea; background: #fff; }}
-    section {{ padding: 18px 24px 24px; }}
-    section h2 {{ margin: 14px 0 8px; }}
-    a {{ color: #155eef; text-decoration: none; }}
-    ul {{ list-style: none; padding: 0; margin: 0; }}
-    li {{ margin-bottom: 8px; }}
-    .site-link {{ display: block; padding: 10px; border-radius: 6px; border: 1px solid transparent; }}
-    .selected {{ border-color: #155eef; background: #edf3ff; font-weight: 700; }}
-    table {{ width: 100%; border-collapse: collapse; margin: 8px 0 18px; background: #fff; }}
-    th, td {{ padding: 8px; border: 1px solid #d8deea; text-align: left; vertical-align: top; }}
-    th {{ background: #edf1f7; }}
-    .status {{ display: inline-block; min-width: 96px; padding: 4px 8px; border-radius: 999px; text-align: center; font-weight: 700; }}
-    .status-2xx {{ background: #d9f7be; color: #135200; }}
-    .status-3xx {{ background: #ffe7ba; color: #ad4e00; }}
-    .status-4xx {{ background: #ffd8bf; color: #ad2102; }}
-    .status-5xx {{ background: #ffccc7; color: #820014; }}
-    .status-network_error {{ background: #5c0011; color: #fff1f0; }}
-    .status-probe_error {{ background: #efdbff; color: #391085; }}
-    .status-unknown {{ background: #f0f0f0; color: #595959; }}
-    .stale {{ display: inline-block; padding: 4px 8px; border-radius: 999px; background: #fff1f0; color: #a8071a; font-weight: 700; }}
-    .table-scroll {{ overflow-x: auto; }}
-    .overall-uptime {{ margin: -10px 0 12px; }}
-    .toolbar {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 8px 0; }}
-    .toolbar label {{ display: grid; gap: 4px; font-weight: 700; }}
-    .toolbar input {{ padding: 8px; border: 1px solid #b8c2d6; border-radius: 6px; }}
-    .toolbar button {{ padding: 9px 12px; border: 0; border-radius: 6px; background: #155eef; color: #fff; font-weight: 700; cursor: pointer; }}
-    .date-navigation {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
-    .date-nav-link {{ display: inline-block; padding: 8px 10px; border: 1px solid #b8c2d6; border-radius: 6px; background: #fff; font-weight: 700; }}
-    .date-nav-link.disabled {{ color: #98a2b3; background: #f2f4f7; cursor: not-allowed; }}
-    .chart-panel {{ background: #fff; border: 1px solid #d8deea; border-radius: 8px; padding: 12px; margin: 8px 0 18px; font-size: 14px; }}
-    .chart-layout {{ display: grid; grid-template-columns: minmax(140px, 190px) minmax(0, 1fr); gap: 12px; align-items: start; }}
-    .chart-plot {{ min-width: 0; }}
-    .chart {{ width: 100%; height: auto; min-height: 280px; overflow: visible; }}
-    .axis {{ stroke: #b8c2d6; stroke-width: 1; }}
-    .grid {{ stroke: #e6eaf2; stroke-width: 1; }}
-    .series-segment {{ fill: none; stroke-width: 1.25; stroke-linecap: round; }}
-    .point-hit {{ fill: transparent; stroke: transparent; stroke-width: 2; pointer-events: all; }}
-    .point-hit:hover, .point-hit:focus {{ fill: #fff; stroke: var(--probe-color); outline: none; }}
-    .problem-marker {{ stroke: #fff; stroke-width: 1.5; pointer-events: all; }}
-    .problem-marker:hover, .problem-marker:focus {{ stroke: #18202f; stroke-width: 3; outline: none; }}
-    .legend {{ display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }}
-    .legend-item, .status-toggle {{ display: inline-flex; gap: 6px; align-items: center; padding: 5px 8px; border: 1px solid #b8c2d6; border-radius: 999px; background: #fff; color: inherit; cursor: pointer; }}
-    .legend-item[aria-pressed="false"] {{ opacity: 0.45; text-decoration: line-through; }}
-    .status-toggle[aria-pressed="true"] {{ border-color: #155eef; background: #edf3ff; box-shadow: 0 1px 4px rgba(21, 94, 239, 0.24); }}
-    .status-toggle[aria-pressed="false"] {{ color: #667085; background: #f2f4f7; border-style: dashed; opacity: 0.65; }}
-    .swatch {{ width: 12px; height: 12px; border-radius: 999px; display: inline-block; }}
-    .status-point-3xx {{ fill: #fa8c16; }}
-    .status-point-4xx {{ fill: #f5222d; }}
-    .status-point-5xx {{ fill: #a8071a; }}
-    .status-point-network_error {{ fill: #5c0011; }}
-    .status-point-probe_error {{ fill: #722ed1; }}
-    .status-filters {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }}
-    .status-toggle .status {{ min-width: 0; padding: 2px 6px; }}
-    .event-strip-label {{ fill: #667085; font-size: 14px; }}
-    .event-strip-line {{ stroke: #b8c2d6; stroke-width: 1; }}
-    [hidden] {{ display: none !important; }}
-    .muted {{ color: #667085; }}
-    .error {{ padding: 10px; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; border-radius: 6px; }}
-    .logout {{ background: none; border: 1px solid #b8c2d6; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
-    @media (max-width: 900px) {{
-      .chart-layout {{ grid-template-columns: 1fr; }}
-      .legend {{ flex-direction: row; flex-wrap: wrap; }}
-    }}
-  </style>
-</head>
-<body>
-  <header>
-    <div><strong>PING Dashboard</strong> <span class="muted">signed in as {escape(username)}</span></div>
-    <form method="post" action="/logout"><button class="logout" type="submit">Logout</button></form>
-  </header>
-  <main>
-    <aside>
-      <h2>Sites</h2>
-      {sites_html}
-    </aside>
-    <section>
-      <h2>Сводка по probes</h2>
-      {statuses_html}
-      <h2>Response Time History</h2>
-      {date_form_html}
-      {chart_html}
-      <h2>Check Details</h2>
-      {detail_limit_form_html}
-      {details_html}
-      <h2>Problems for selected period</h2>
-      {problems_html}
-    </section>
-  </main>
-  <script>
-    {auto_refresh_script}
-    (() => {{
-      const chart = document.querySelector("[data-response-chart]");
-      if (!chart) return;
-      const storageKey = "ping-dashboard-chart-filters-v1";
-      let saved = {{ probes: {{}}, statuses: {{}} }};
-      try {{ saved = JSON.parse(localStorage.getItem(storageKey)) || saved; }} catch (_) {{}}
-      saved.probes ||= {{}};
-      saved.statuses ||= {{}};
 
-      const probeButtons = [...chart.querySelectorAll("[data-probe-toggle]")];
-      const statusButtons = [...chart.querySelectorAll("[data-status-toggle]")];
-      const enabled = (group, key) => saved[group][key] !== false;
-
-      function applyFilters() {{
-        probeButtons.forEach((button) => {{
-          button.setAttribute("aria-pressed", String(enabled("probes", button.dataset.probeToggle)));
-        }});
-        statusButtons.forEach((button) => {{
-          button.setAttribute("aria-pressed", String(enabled("statuses", button.dataset.statusToggle)));
-        }});
-        chart.querySelectorAll("[data-filter-item]").forEach((item) => {{
-          const probeVisible = enabled("probes", item.dataset.probeId);
-          const statuses = (item.dataset.statuses || item.dataset.statusGroup || "").split(" ").filter(Boolean);
-          const statusesVisible = statuses.every((value) => enabled("statuses", value));
-          if (probeVisible && statusesVisible) {{
-            item.removeAttribute("hidden");
-          }} else {{
-            item.setAttribute("hidden", "");
-          }}
-        }});
-      }}
-
-      function persist() {{
-        try {{ localStorage.setItem(storageKey, JSON.stringify(saved)); }} catch (_) {{}}
-      }}
-
-      probeButtons.forEach((button) => button.addEventListener("click", () => {{
-        const key = button.dataset.probeToggle;
-        saved.probes[key] = !enabled("probes", key);
-        persist();
-        applyFilters();
-      }}));
-      statusButtons.forEach((button) => button.addEventListener("click", () => {{
-        const key = button.dataset.statusToggle;
-        saved.statuses[key] = !enabled("statuses", key);
-        persist();
-        applyFilters();
-      }}));
-      applyFilters();
-    }})();
-  </script>
-</body>
-</html>"""
+def _render_login_page(*, error: str | None = None) -> str:
+    return templates.get_template("login.html").render(error=error)
 
 
-def _render_sites(
-    sites: list[Site],
-    selected_site: Site | None,
-    period: DashboardPeriod,
-    detail_limit: int,
-) -> str:
-    if not sites:
-        return '<p class="muted">No active sites configured.</p>'
+def _build_dashboard_context(
+    *, username: str, sites: list[Site], selected_site: Site | None,
+    probes: list[Probe], latest_results: dict[str, CheckResult],
+    period_results: list[CheckResult], detail_results: list[CheckResult],
+    detail_limit: int, detail_page: int, detail_count: int,
+    period: DashboardPeriod, filters: DashboardFilters,
+    min_date: date, max_date: date,
+) -> dict[str, object]:
+    return {
+        "username": username,
+        "sites_view": _build_sites_view(
+            sites, selected_site, period, detail_limit, filters
+        ),
+        "summary_view": _build_probe_summary_view(
+            probes,
+            latest_results,
+            period_results,
+            period=period,
+            now=datetime.now(UTC),
+        ),
+        "date_form": _build_date_form_view(
+            selected_site,
+            period,
+            min_date,
+            max_date,
+            detail_limit,
+            filters,
+        ),
+        "detail_controls": _build_detail_controls_view(
+            selected_site, period, detail_limit, filters
+        ),
+        "chart": _build_response_time_chart_view(
+            period_results, probes, period, filters
+        ),
+        "detail_rows": _build_result_rows(detail_results, probes),
+        "pagination": _build_detail_pagination_view(
+            selected_site, period, detail_limit, detail_page, detail_count,
+            filters,
+        ),
+        "filters": {
+            "probes": filters.probe_query,
+            "statuses": filters.status_query,
+        },
+        "auto_refresh": period.selected_date == max_date,
+    }
 
-    items = []
+
+def _build_sites_view(
+    sites: list[Site], selected_site: Site | None,
+    period: DashboardPeriod, detail_limit: int, filters: DashboardFilters,
+) -> list[dict[str, object]]:
     selected_id = selected_site.id if selected_site is not None else None
-    for site in sites:
-        css_class = "site-link selected" if site.id == selected_id else "site-link"
-        query = urlencode(
-            {
+    return [
+        {
+            "name": site.name,
+            "href": "/dashboard?" + urlencode({
                 "site_id": site.id,
                 "date": period.selected_date.isoformat(),
                 "from_time": period.from_time.strftime("%H:%M"),
                 "to_time": period.to_time.strftime("%H:%M"),
                 "limit": detail_limit,
-            }
-        )
-        items.append(
-            f'<li><a class="{css_class}" href="/dashboard?{escape(query, quote=True)}">'
-            f"{escape(site.name)}</a></li>"
-        )
-    return f"<ul>{''.join(items)}</ul>"
+                "probes": filters.probe_query,
+                "statuses": filters.status_query,
+            }),
+            "selected": site.id == selected_id,
+        }
+        for site in sites
+    ]
 
 
 def _summarize_probe_period(
-    probes: list[Probe],
-    results: list[CheckResult],
-    *,
-    period: DashboardPeriod,
+    probes: list[Probe], results: list[CheckResult], *, period: DashboardPeriod,
 ) -> tuple[list[ProbePeriodSummary], float | None]:
     probe_ids = {probe.id for probe in probes}
     grouped: dict[str, list[CheckResult]] = defaultdict(list)
@@ -601,8 +464,7 @@ def _summarize_probe_period(
             grouped[result.probe_id].append(result)
 
     expected_checks = max(
-        (period.end_at - period.start_at).total_seconds() / PROBE_INTERVAL_SECONDS,
-        0,
+        (period.end_at - period.start_at).total_seconds() / PROBE_INTERVAL_SECONDS, 0
     )
     summaries = []
     total_received = 0
@@ -622,42 +484,29 @@ def _summarize_probe_period(
             )
             for status_group in STATUS_GROUPS
         }
-        summaries.append(
-            ProbePeriodSummary(
-                probe_id=probe.id,
-                average_response_time_ms=(
-                    sum(response_times) / len(response_times) if response_times else None
-                ),
-                uptime_percent=(successful / received * 100 if received else None),
-                received_checks=received,
-                coverage_percent=(
-                    min(received / expected_checks * 100, 100)
-                    if expected_checks
-                    else 0
-                ),
-                status_counts=counts,
-            )
-        )
+        summaries.append(ProbePeriodSummary(
+            probe_id=probe.id,
+            average_response_time_ms=(
+                sum(response_times) / len(response_times) if response_times else None
+            ),
+            uptime_percent=(successful / received * 100 if received else None),
+            received_checks=received,
+            coverage_percent=(
+                min(received / expected_checks * 100, 100) if expected_checks else 0
+            ),
+            status_counts=counts,
+        ))
         total_received += received
         total_successful += successful
-
-    overall_uptime = (
-        total_successful / total_received * 100 if total_received else None
-    )
-    return summaries, overall_uptime
+    overall = total_successful / total_received * 100 if total_received else None
+    return summaries, overall
 
 
-def _render_probe_period_summary(
-    probes: list[Probe],
-    latest_results: dict[str, CheckResult],
-    period_results: list[CheckResult],
-    *,
-    period: DashboardPeriod,
-    now: datetime,
-) -> str:
-    if not probes:
-        return '<p class="muted">Нет включённых probes.</p>'
-
+def _build_probe_summary_view(
+    probes: list[Probe], latest_results: dict[str, CheckResult],
+    period_results: list[CheckResult], *, period: DashboardPeriod, now: datetime,
+    status_groups: tuple[str, ...] = STATUS_GROUPS,
+) -> dict[str, object]:
     summaries, overall_uptime = _summarize_probe_period(
         probes, period_results, period=period
     )
@@ -666,415 +515,345 @@ def _render_probe_period_summary(
     for probe in probes:
         result = latest_results.get(probe.id)
         summary = summaries_by_probe[probe.id]
-        if result is None:
-            checked_at_html = '<span class="muted">нет данных</span>'
-        else:
-            stale_html = ""
-            if now - result.checked_at > STALE_AFTER:
-                stale_html = ' <span class="stale">stale</span>'
-            checked_at_html = f"{escape(_format_datetime(result.checked_at))}{stale_html}"
-
-        average_response = (
-            f"{summary.average_response_time_ms:.1f} ms"
-            if summary.average_response_time_ms is not None
-            else "—"
-        )
-        uptime = (
-            f"{summary.uptime_percent:.1f}%"
-            if summary.uptime_percent is not None
-            else "Нет данных"
-        )
-
-        rows.append(
-            "<tr>"
-            f"<td>{escape(probe.name)}</td>"
-            f"<td>{escape(probe.region)}</td>"
-            f"<td>{checked_at_html}</td>"
-            f"<td>{escape(average_response)}</td>"
-            f"<td>{escape(uptime)}</td>"
-            f"<td>{summary.received_checks}</td>"
-            f"<td>{summary.coverage_percent:.1f}%</td>"
-            + "".join(
-                f"<td>{summary.status_counts[status_group]}</td>"
-                for status_group in STATUS_GROUPS
-            )
-            + "</tr>"
-        )
-
-    overall = (
-        f"Общий uptime по полученным проверкам: {overall_uptime:.1f}%"
-        if overall_uptime is not None
-        else "Общий uptime: нет данных за выбранный период."
-    )
-    status_labels = {
-        "2xx": "2xx",
-        "3xx": "3xx",
-        "4xx": "4xx",
-        "5xx": "5xx",
-        "network_error": "Сеть",
-        "probe_error": "Probe",
+        rows.append({
+            "name": probe.name,
+            "region": probe.region,
+            "checked_at": _format_datetime(result.checked_at) if result else None,
+            "stale": result is not None and now - result.checked_at > STALE_AFTER,
+            "average_response": (
+                f"{summary.average_response_time_ms:.1f} ms"
+                if summary.average_response_time_ms is not None else "—"
+            ),
+            "uptime": (
+                f"{summary.uptime_percent:.1f}%"
+                if summary.uptime_percent is not None else "Нет данных"
+            ),
+            "received_checks": summary.received_checks,
+            "coverage": f"{summary.coverage_percent:.1f}%",
+            "status_counts": summary.status_counts,
+        })
+    return {
+        "rows": rows,
+        "status_groups": status_groups,
+        "status_labels": {
+            "2xx": "2xx", "3xx": "3xx", "4xx": "4xx", "5xx": "5xx",
+            "network_error": "Сеть", "probe_error": "Probe",
+        },
+        "overall": (
+            f"Общий uptime по полученным проверкам: {overall_uptime:.1f}%"
+            if overall_uptime is not None
+            else "Общий uptime: нет данных за выбранный период."
+        ),
     }
-    status_headers = "".join(
-        f"<th>{status_labels[status_group]}</th>" for status_group in STATUS_GROUPS
-    )
-    return (
-        '<div class="table-scroll"><table><thead><tr><th>Probe</th><th>Регион</th>'
-        "<th>Последняя проверка</th><th>Среднее время</th><th>Uptime</th>"
-        f"<th>Получено</th><th>Покрытие</th>{status_headers}</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></div>"
-        f'<p class="muted overall-uptime">{escape(overall)}</p>'
-    )
 
 
-def _render_date_form(
-    selected_site: Site | None,
-    period: DashboardPeriod,
-    min_date: date,
-    max_date: date,
-    detail_limit: int,
+def _render_probe_period_summary(
+    probes: list[Probe], latest_results: dict[str, CheckResult],
+    period_results: list[CheckResult], *, period: DashboardPeriod, now: datetime,
 ) -> str:
-    site_input = (
-        f'<input type="hidden" name="site_id" value="{selected_site.id}">'
-        if selected_site is not None
-        else ""
-    )
-    message_html = (
-        f'<p class="error">{escape(period.message)}</p>' if period.message else ""
-    )
-    navigation_parameters = {
-        "from_time": period.from_time.strftime("%H:%M"),
-        "to_time": period.to_time.strftime("%H:%M"),
-        "limit": detail_limit,
-    }
-    if selected_site is not None:
-        navigation_parameters["site_id"] = selected_site.id
-
-    def navigation_action(label: str, target_date: date, *, disabled: bool) -> str:
-        if disabled:
-            return (
-                f'<span class="date-nav-link disabled" aria-disabled="true">'
-                f"{escape(label)}</span>"
-            )
-        query = urlencode({**navigation_parameters, "date": target_date.isoformat()})
-        return (
-            f'<a class="date-nav-link" href="/dashboard?{escape(query, quote=True)}">'
-            f"{escape(label)}</a>"
+    return templates.get_template("partials/probe_summary.html").render(
+        summary_view=_build_probe_summary_view(
+            probes, latest_results, period_results, period=period, now=now
         )
-
-    previous_action = navigation_action(
-        "Previous day",
-        period.selected_date - timedelta(days=1),
-        disabled=period.selected_date <= min_date,
     )
-    today_action = navigation_action(
-        "Today",
-        max_date,
-        disabled=period.selected_date == max_date,
-    )
-    next_action = navigation_action(
-        "Next day",
-        period.selected_date + timedelta(days=1),
-        disabled=period.selected_date >= max_date,
-    )
-    return f"""
-      {message_html}
-      <form class="toolbar" method="get" action="/dashboard">
-        {site_input}
-        <label for="date">Date
-          <input id="date" name="date" type="date" value="{period.selected_date.isoformat()}"
-            min="{min_date.isoformat()}" max="{max_date.isoformat()}">
-        </label>
-        <nav class="date-navigation" aria-label="Date navigation">
-          {previous_action}
-          {today_action}
-          {next_action}
-        </nav>
-        <label for="from_time">From (MSK)
-          <input id="from_time" name="from_time" type="time"
-            value="{period.from_time.strftime('%H:%M')}" required>
-        </label>
-        <label for="to_time">To (MSK)
-          <input id="to_time" name="to_time" type="time"
-            value="{period.to_time.strftime('%H:%M')}" required>
-        </label>
-        <input type="hidden" name="limit" value="{detail_limit}">
-        <button type="submit">Show</button>
-      </form>
-    """
 
 
-def _render_detail_limit_form(
-    selected_site: Site | None,
-    period: DashboardPeriod,
-    detail_limit: int,
+def _dashboard_query(
+    selected_site: Site | None, period: DashboardPeriod,
+    detail_limit: int, filters: DashboardFilters, **overrides: int | str,
 ) -> str:
-    hidden_values: dict[str, int | str] = {
+    parameters: dict[str, int | str] = {
         "date": period.selected_date.isoformat(),
         "from_time": period.from_time.strftime("%H:%M"),
         "to_time": period.to_time.strftime("%H:%M"),
+        "limit": detail_limit,
+        "probes": filters.probe_query,
+        "statuses": filters.status_query,
     }
     if selected_site is not None:
-        hidden_values["site_id"] = selected_site.id
-    hidden_inputs = "".join(
-        f'<input type="hidden" name="{name}" value="{escape(str(value), quote=True)}">'
-        for name, value in hidden_values.items()
-    )
-    limit_options = "".join(
-        f'<option value="{value}"{" selected" if value == detail_limit else ""}>{value}</option>'
-        for value in DETAIL_LIMITS
-    )
-    return (
-        '<form class="toolbar details-toolbar" method="get" action="/dashboard">'
-        f'{hidden_inputs}<label for="limit">Строк на странице '
-        f'<select id="limit" name="limit">{limit_options}</select></label>'
-        '<button type="submit">Показать</button></form>'
-    )
+        parameters["site_id"] = selected_site.id
+    parameters.update(overrides)
+    return "/dashboard?" + urlencode(parameters)
 
 
-def _render_response_time_chart(
-    daily_results: list[CheckResult],
-    probes: list[Probe],
-) -> str:
-    chartable_results = [
-        result for result in daily_results if result.response_time_ms is not None
+def _date_navigation_action(
+    *, label: str, aria_label: str, target_date: date, disabled: bool,
+    selected_site: Site | None, period: DashboardPeriod, detail_limit: int,
+    filters: DashboardFilters,
+) -> dict[str, object]:
+    return {
+        "label": label, "aria_label": aria_label, "disabled": disabled,
+        "href": None if disabled else _dashboard_query(
+            selected_site, period, detail_limit, filters,
+            date=target_date.isoformat(), page=1
+        ),
+    }
+
+
+def _build_date_form_view(
+    selected_site: Site | None, period: DashboardPeriod,
+    min_date: date, max_date: date, detail_limit: int, filters: DashboardFilters,
+) -> dict[str, object]:
+    shared = {
+        "selected_site": selected_site, "period": period,
+        "detail_limit": detail_limit, "filters": filters,
+    }
+    return {
+        "site_id": selected_site.id if selected_site else None,
+        "message": period.message,
+        "selected_date": period.selected_date.isoformat(),
+        "min_date": min_date.isoformat(), "max_date": max_date.isoformat(),
+        "from_time": period.from_time.strftime("%H:%M"),
+        "to_time": period.to_time.strftime("%H:%M"),
+        "detail_limit": detail_limit,
+        "probes": filters.probe_query,
+        "statuses": filters.status_query,
+        "previous": _date_navigation_action(
+            label="‹", aria_label="Предыдущий день",
+            target_date=period.selected_date - timedelta(days=1),
+            disabled=period.selected_date <= min_date, **shared
+        ),
+        "today": _date_navigation_action(
+            label="Сегодня", aria_label="Перейти к сегодняшнему дню",
+            target_date=max_date, disabled=period.selected_date == max_date, **shared
+        ),
+        "next": _date_navigation_action(
+            label="›", aria_label="Следующий день",
+            target_date=period.selected_date + timedelta(days=1),
+            disabled=period.selected_date >= max_date, **shared
+        ),
+    }
+
+
+def _build_detail_controls_view(
+    selected_site: Site | None, period: DashboardPeriod, detail_limit: int,
+    filters: DashboardFilters,
+) -> dict[str, object]:
+    return {
+        "site_id": selected_site.id if selected_site else None,
+        "date": period.selected_date.isoformat(),
+        "from_time": period.from_time.strftime("%H:%M"),
+        "to_time": period.to_time.strftime("%H:%M"),
+        "detail_limit": detail_limit, "detail_limits": DETAIL_LIMITS,
+        "probes": filters.probe_query, "statuses": filters.status_query,
+    }
+
+
+def _build_detail_pagination_view(
+    selected_site: Site | None, period: DashboardPeriod, detail_limit: int,
+    detail_page: int, detail_count: int, filters: DashboardFilters,
+) -> dict[str, object]:
+    total_pages = max(ceil(detail_count / detail_limit), 1)
+    return {
+        "page": detail_page, "total_pages": total_pages, "count": detail_count,
+        "previous_href": (
+            _dashboard_query(
+                selected_site,
+                period,
+                detail_limit,
+                filters,
+                page=detail_page - 1,
+            )
+            if detail_page > 1 else None
+        ),
+        "next_href": (
+            _dashboard_query(
+                selected_site,
+                period,
+                detail_limit,
+                filters,
+                page=detail_page + 1,
+            )
+            if detail_page < total_pages else None
+        ),
+    }
+
+
+def _build_response_time_chart_view(
+    daily_results: list[CheckResult], probes: list[Probe], period: DashboardPeriod,
+    filters: DashboardFilters | None = None,
+) -> dict[str, object] | None:
+    chartable = [item for item in daily_results if item.response_time_ms is not None]
+    events = [
+        item for item in daily_results
+        if item.response_time_ms is None
+        and item.status_group in ("network_error", "probe_error")
     ]
-    event_results = [
-        result
-        for result in daily_results
-        if result.response_time_ms is None
-        and result.status_group in ("network_error", "probe_error")
-    ]
-    if not chartable_results and not event_results:
-        return '<p class="muted">No response time data for the selected period.</p>'
+    if not chartable and not events:
+        return None
 
-    width = 900
-    height = 360
-    left = 56
-    right = 24
-    top = 20
-    bottom = 82
-    plot_width = width - left - right
-    plot_height = height - top - bottom
-    max_response_time = max(
-        (result.response_time_ms or 0 for result in chartable_results), default=100
+    width, height, left, right, top, bottom = 900, 360, 56, 24, 20, 82
+    plot_width, plot_height = width - left - right, height - top - bottom
+    if filters is None:
+        filters = DashboardFilters(
+            probe_ids=tuple(probe.id for probe in probes),
+            status_groups=STATUS_GROUPS,
+        )
+    visible_chartable = [
+        item for item in chartable
+        if item.probe_id in filters.probe_ids
+        and item.status_group in filters.status_groups
+    ]
+    visible_max = max(
+        (item.response_time_ms or 0 for item in visible_chartable), default=0
     )
-    max_response_time = max(max_response_time, 100)
-    probe_names = {probe.id: probe.name for probe in probes}
-    probe_colors = _probe_colors(probes)
+    max_response = max(round(visible_max * 1.1), 10) if visible_max else 100
+    names = {probe.id: probe.name for probe in probes}
+    colors = _probe_colors(probes)
     grouped: dict[str, list[CheckResult]] = defaultdict(list)
     for result in daily_results:
         grouped[result.probe_id].append(result)
+    period_seconds = max((period.end_at - period.start_at).total_seconds(), 60)
 
-    def x_position(value: datetime) -> float:
-        seconds = (
-            value.astimezone(MSK).hour * 3600
-            + value.astimezone(MSK).minute * 60
-            + value.astimezone(MSK).second
-        )
-        return left + (seconds / 86399) * plot_width
+    def x_position(value: datetime) -> str:
+        seconds = (value - period.start_at).total_seconds()
+        return f"{left + seconds / period_seconds * plot_width:.1f}"
 
-    def y_position(response_time_ms: int) -> float:
-        return top + plot_height - (response_time_ms / max_response_time) * plot_height
+    def y_position(value: int) -> str:
+        return f"{top + plot_height - value / max_response * plot_height:.1f}"
 
-    grid_lines = []
-    for hour in (0, 6, 12, 18, 24):
-        x = left + (hour / 24) * plot_width
-        label = (f"{hour:02d}:00" if hour < 24 else "24:00") + " MSK"
-        grid_lines.append(
-            f'<line class="grid" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_height}"></line>'
-            f'<text x="{x:.1f}" y="{height - 12}" text-anchor="middle" fill="#667085" font-size="14">{label}</text>'
-        )
+    grid_ticks = []
+    for index in range(5):
+        ratio = index / 4
+        tick_at = period.start_at + timedelta(seconds=period_seconds * ratio)
+        if index == 4:
+            tick_at = period.end_at - timedelta(minutes=1)
+        grid_ticks.append({
+            "x": f"{left + ratio * plot_width:.1f}",
+            "label": tick_at.astimezone(MSK).strftime("%H:%M MSK"),
+        })
+    y_ticks = [
+        {
+            "y": f"{top + plot_height - ratio * plot_height:.1f}",
+            "label_y": f"{top + plot_height - ratio * plot_height + 4:.1f}",
+            "label": f"{round(max_response * ratio)} ms",
+        }
+        for ratio in (0, 0.5, 1)
+    ]
 
-    y_labels = []
-    for ratio in (0, 0.5, 1):
-        y = top + plot_height - ratio * plot_height
-        value = round(max_response_time * ratio)
-        y_labels.append(
-            f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" y2="{y:.1f}"></line>'
-            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" fill="#667085" font-size="14">{value} ms</text>'
-        )
-
-    series_html = []
-    legend_items = []
+    series = []
+    legends = []
     for probe in probes:
-        probe_id = probe.id
-        results = grouped.get(probe_id, [])
-        sorted_results = sorted(results, key=lambda result: result.checked_at)
-        color = probe_colors[probe_id]
+        probe_results = sorted(
+            grouped.get(probe.id, []), key=lambda item: item.checked_at
+        )
+        color = colors[probe.id]
         segments = []
-        for previous, current in zip(sorted_results, sorted_results[1:]):
-            gap_seconds = (current.checked_at - previous.checked_at).total_seconds()
+        for previous, current in zip(probe_results, probe_results[1:]):
+            gap = (current.checked_at - previous.checked_at).total_seconds()
             if (
-                previous.response_time_ms is None
-                or current.response_time_ms is None
-                or gap_seconds < 0
-                or gap_seconds > PROBE_INTERVAL_SECONDS * 2
+                previous.response_time_ms is None or current.response_time_ms is None
+                or gap < 0 or gap > PROBE_INTERVAL_SECONDS * 2
             ):
                 continue
-            statuses = f"{_safe_status_css(previous.status_group)} {_safe_status_css(current.status_group)}"
-            segments.append(
-                f'<line class="series-segment" data-filter-item data-probe-id="{escape(probe_id)}" '
-                f'data-statuses="{escape(statuses)}" style="stroke:{color}" '
-                f'x1="{x_position(previous.checked_at):.1f}" '
-                f'y1="{y_position(previous.response_time_ms):.1f}" '
-                f'x2="{x_position(current.checked_at):.1f}" '
-                f'y2="{y_position(current.response_time_ms):.1f}"></line>'
-            )
-
+            segments.append({
+                "statuses": (
+                    f"{_safe_status_css(previous.status_group)} "
+                    f"{_safe_status_css(current.status_group)}"
+                ),
+                "color": color,
+                "x1": x_position(previous.checked_at),
+                "y1": y_position(previous.response_time_ms),
+                "x2": x_position(current.checked_at),
+                "y2": y_position(current.response_time_ms),
+                "visible": (
+                    probe.id in filters.probe_ids
+                    and previous.status_group in filters.status_groups
+                    and current.status_group in filters.status_groups
+                ),
+            })
         markers = []
-        for result in sorted_results:
-            if result.response_time_ms is None:
-                continue
-            title = (
-                f"{probe_names.get(result.probe_id, result.probe_id)} "
-                f"{_format_datetime(result.checked_at)} "
-                f"{result.response_time_ms} ms "
-                f"{result.status_group} "
-                f"{result.http_status or result.error_type or ''}"
-            )
+        probe_events = []
+        for result in probe_results:
             css_status = _safe_status_css(result.status_group)
-            marker_class = (
-                "point-hit"
-                if result.status_group == "2xx"
-                else f"problem-marker status-point-{css_status}"
-            )
-            marker_radius = "7" if result.status_group == "2xx" else "4"
-            markers.append(
-                f'<circle class="{marker_class}" data-filter-item data-probe-id="{escape(probe_id)}" '
-                f'data-status-group="{escape(css_status)}" '
-                f'cx="{x_position(result.checked_at):.1f}" '
-                f'cy="{y_position(result.response_time_ms):.1f}" r="{marker_radius}" '
-                f'tabindex="0" aria-label="{escape(title, quote=True)}" '
-                f'style="--probe-color:{color}">'
-                f"<title>{escape(title)}</title></circle>"
-            )
-        events = []
-        for result in sorted_results:
-            if (
-                result.response_time_ms is not None
-                or result.status_group not in ("network_error", "probe_error")
-            ):
-                continue
-            css_status = _safe_status_css(result.status_group)
-            title = (
-                f"{probe_names.get(result.probe_id, result.probe_id)} "
-                f"{_format_datetime(result.checked_at)} "
-                f"{result.status_group} {result.error_type or result.result_status}"
-            )
-            events.append(
-                f'<circle class="problem-marker status-point-{css_status}" data-filter-item '
-                f'data-probe-id="{escape(probe_id)}" data-status-group="{escape(css_status)}" '
-                f'cx="{x_position(result.checked_at):.1f}" cy="{top + plot_height + 32}" r="5" '
-                f'tabindex="0" aria-label="{escape(title, quote=True)}">'
-                f"<title>{escape(title)}</title></circle>"
-            )
-        series_html.append(
-            f'<g data-probe-series="{escape(probe_id)}">'
-            f"{''.join(segments)}{''.join(markers)}{''.join(events)}</g>"
-        )
-        legend_items.append(
-            f'<button class="legend-item" type="button" data-probe-toggle="{escape(probe_id)}" aria-pressed="true">'
-            f'<span class="swatch" style="background:{color}"></span>{escape(probe.name)}</button>'
-        )
-
-    status_toggles = "".join(
-        f'<button class="status-toggle" type="button" data-status-toggle="{status_group}" '
-        f'aria-pressed="true">{_status_badge(status_group)}</button>'
-        for status_group in STATUS_GROUPS
-    )
-    event_strip = (
-        f'<line class="event-strip-line" x1="{left}" y1="{top + plot_height + 32}" '
-        f'x2="{left + plot_width}" y2="{top + plot_height + 32}"></line>'
-        f'<text class="event-strip-label" x="{left - 8}" y="{top + plot_height + 36}" '
-        'text-anchor="end">Errors</text>'
-    )
-
-    return (
-        '<div class="chart-panel" data-response-chart>'
-        f'<div class="status-filters" aria-label="Status group filters">{status_toggles}</div>'
-        '<div class="chart-layout">'
-        f'<div class="legend" aria-label="Probe filters">{"".join(legend_items)}</div>'
-        '<div class="chart-plot">'
-        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
-        'aria-label="Response time by probe for selected period">'
-        f'{"".join(grid_lines)}{"".join(y_labels)}'
-        f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"></line>'
-        f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"></line>'
-        f'{event_strip}{"".join(series_html)}'
-        "</svg></div></div></div>"
-    )
+            if result.response_time_ms is not None:
+                title = (
+                    f"{names.get(result.probe_id, result.probe_id)} "
+                    f"{_format_datetime(result.checked_at)} "
+                    f"{result.response_time_ms} ms {result.status_group} "
+                    f"{result.http_status or result.error_type or ''}"
+                )
+                markers.append({
+                    "class_name": (
+                        "point-ok" if result.status_group == "2xx"
+                        else f"problem-marker status-point-{css_status}"
+                    ),
+                    "status_group": css_status,
+                    "cx": x_position(result.checked_at),
+                    "cy": y_position(result.response_time_ms),
+                    "response_time_ms": result.response_time_ms,
+                    "visible": (
+                        probe.id in filters.probe_ids
+                        and result.status_group in filters.status_groups
+                    ),
+                    "title": title, "color": color,
+                })
+            elif result.status_group in ("network_error", "probe_error"):
+                probe_events.append({
+                    "class_name": f"problem-marker status-point-{css_status}",
+                    "status_group": css_status,
+                    "cx": x_position(result.checked_at),
+                    "visible": (
+                        probe.id in filters.probe_ids
+                        and result.status_group in filters.status_groups
+                    ),
+                    "title": (
+                        f"{names.get(result.probe_id, result.probe_id)} "
+                        f"{_format_datetime(result.checked_at)} {result.status_group} "
+                        f"{result.error_type or result.result_status}"
+                    ),
+                })
+        series.append({
+            "probe_id": probe.id, "segments": segments,
+            "markers": markers, "events": probe_events,
+        })
+        legends.append({
+            "probe_id": probe.id,
+            "name": probe.name,
+            "color": color,
+            "enabled": probe.id in filters.probe_ids,
+        })
+    return {
+        "width": width, "height": height, "left": left,
+        "right": left + plot_width, "top": top, "bottom": top + plot_height,
+        "event_y": top + plot_height + 32,
+        "event_label_y": top + plot_height + 36,
+        "event_label_x": left - 8,
+        "grid_ticks": grid_ticks, "y_ticks": y_ticks,
+        "series": series,
+        "legends": legends,
+        "status_groups": [
+            {"name": group, "enabled": group in filters.status_groups}
+            for group in STATUS_GROUPS
+        ],
+        "has_visible_response_data": bool(visible_chartable),
+        "max_response": max_response,
+    }
 
 
-def _render_daily_details(
-    daily_results: list[CheckResult],
-    probes: list[Probe],
+def _render_response_time_chart(
+    daily_results: list[CheckResult], probes: list[Probe], period: DashboardPeriod,
+    filters: DashboardFilters | None = None,
 ) -> str:
-    if not daily_results:
-        return '<p class="muted">No check results for the selected period.</p>'
-
-    probe_names = {probe.id: probe.name for probe in probes}
-    rows = []
-    for result in daily_results:
-        detail = str(result.http_status or result.error_type or result.result_status)
-        response_time = (
-            f"{result.response_time_ms} ms"
-            if result.response_time_ms is not None
-            else ""
-        )
-        rows.append(
-            "<tr>"
-            f"<td>{escape(_format_datetime(result.checked_at))}</td>"
-            f"<td>{escape(probe_names.get(result.probe_id, result.probe_id))}</td>"
-            f"<td>{_status_badge(result.status_group)}</td>"
-            f"<td>{escape(detail)}</td>"
-            f"<td>{escape(response_time)}</td>"
-            "</tr>"
-        )
-
-    return (
-        "<table><thead><tr><th>Timestamp (MSK)</th><th>Probe</th><th>Status</th>"
-        "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
+    return templates.get_template("partials/response_chart.html").render(
+        chart=_build_response_time_chart_view(daily_results, probes, period, filters)
     )
 
 
-def _render_recent_problems(
-    recent_problems: list[CheckResult],
-    probes: list[Probe],
-    *,
-    total_count: int,
-) -> str:
-    count_html = f'<p class="muted">Total problems: {total_count}</p>'
-    if not recent_problems:
-        return (
-            f'{count_html}<p class="muted">'
-            "За выбранный период проблем не зафиксировано</p>"
-        )
-
+def _build_result_rows(
+    results: list[CheckResult], probes: list[Probe],
+) -> list[dict[str, str]]:
     probe_names = {probe.id: probe.name for probe in probes}
-    rows = []
-    for result in recent_problems:
-        detail = str(result.http_status or result.error_type or result.result_status)
-        response_time = (
-            f"{result.response_time_ms} ms"
-            if result.response_time_ms is not None
-            else ""
-        )
-        rows.append(
-            "<tr>"
-            f"<td>{escape(_format_datetime(result.checked_at))}</td>"
-            f"<td>{escape(probe_names.get(result.probe_id, result.probe_id))}</td>"
-            f"<td>{_status_badge(result.status_group)}</td>"
-            f"<td>{escape(detail)}</td>"
-            f"<td>{escape(response_time)}</td>"
-            "</tr>"
-        )
-
-    return count_html + (
-        "<table><thead><tr><th>Timestamp (MSK)</th><th>Probe</th><th>Status</th>"
-        "<th>HTTP/Error</th><th>Response Time</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    return [{
+        "checked_at": _format_datetime(result.checked_at),
+        "probe_name": probe_names.get(result.probe_id, result.probe_id),
+        "status_group": result.status_group,
+        "status_css": _safe_status_css(result.status_group),
+        "detail": str(result.http_status or result.error_type or result.result_status),
+        "response_time": (
+            f"{result.response_time_ms} ms" if result.response_time_ms is not None else ""
+        ),
+    } for result in results]
 
 
 def _parse_detail_limit(value: str | None) -> int:
@@ -1085,12 +864,12 @@ def _parse_detail_limit(value: str | None) -> int:
     return parsed if parsed in DETAIL_LIMITS else DEFAULT_DETAIL_LIMIT
 
 
-def _status_badge(status_group: str) -> str:
-    css_status = _safe_status_css(status_group)
-    return (
-        f'<span class="status status-{escape(css_status)}">'
-        f"{escape(status_group)}</span>"
-    )
+def _parse_detail_page(value: str | None) -> int:
+    try:
+        parsed = int(value) if value is not None else 1
+    except (TypeError, ValueError):
+        return 1
+    return parsed if parsed > 0 else 1
 
 
 def _safe_status_css(status_group: str) -> str:
